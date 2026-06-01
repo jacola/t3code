@@ -130,6 +130,7 @@ export type ModelCapabilities = typeof ModelCapabilities.Type;
 const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
+const GITHUB_COPILOT_DRIVER_KIND = ProviderDriverKind.make("githubCopilot");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
 export const DEFAULT_MODEL = "gpt-5.4";
@@ -139,6 +140,7 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [CODEX_DRIVER_KIND]: DEFAULT_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-sonnet-4-6",
   [CURSOR_DRIVER_KIND]: "auto",
+  [GITHUB_COPILOT_DRIVER_KIND]: "gpt-5",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
 };
 
@@ -149,6 +151,7 @@ export const DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
   [CODEX_DRIVER_KIND]: DEFAULT_GIT_TEXT_GENERATION_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-haiku-4-5",
   [CURSOR_DRIVER_KIND]: "composer-2",
+  [GITHUB_COPILOT_DRIVER_KIND]: "gpt-5-mini",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
 };
 
@@ -192,6 +195,24 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
     "opus-4.5-thinking": "claude-opus-4-5",
     "opus-4.5": "claude-opus-4-5",
   },
+  [GITHUB_COPILOT_DRIVER_KIND]: {
+    "4.1": "gpt-4.1",
+    "5": "gpt-5",
+    "5-mini": "gpt-5-mini",
+    "5.4": "gpt-5.4",
+    "5.4-mini": "gpt-5.4-mini",
+    opus: "claude-opus-4.7",
+    "opus-4.7": "claude-opus-4.7",
+    "claude-opus-4.7": "claude-opus-4.7",
+    "opus-4.6": "claude-opus-4.6",
+    "claude-opus-4.6": "claude-opus-4.6",
+    sonnet: "claude-sonnet-4.6",
+    "sonnet-4.6": "claude-sonnet-4.6",
+    "claude-sonnet-4.6": "claude-sonnet-4.6",
+    haiku: "claude-haiku-4.5",
+    "haiku-4.5": "claude-haiku-4.5",
+    "claude-haiku-4.5": "claude-haiku-4.5",
+  },
   [OPENCODE_DRIVER_KIND]: {},
 };
 
@@ -201,5 +222,6 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [CODEX_DRIVER_KIND]: "Codex",
   [CLAUDE_DRIVER_KIND]: "Claude",
   [CURSOR_DRIVER_KIND]: "Cursor",
+  [GITHUB_COPILOT_DRIVER_KIND]: "GitHub Copilot",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
 };
