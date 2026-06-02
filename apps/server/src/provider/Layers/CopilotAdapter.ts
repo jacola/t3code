@@ -11,6 +11,7 @@ import {
   type PermissionRequest,
   type PermissionRequestResult,
   type SessionEvent,
+  type UserToolSessionApproval,
 } from "@github/copilot-sdk";
 import {
   ApprovalRequestId,
@@ -88,6 +89,7 @@ interface PendingApprovalRequest {
     | "file_read_approval"
     | "dynamic_tool_call"
     | "unknown";
+  readonly request: PermissionRequest;
   readonly turnId: TurnId | undefined;
   readonly resolve: (result: PermissionRequestResult) => void;
 }
@@ -260,16 +262,52 @@ function toInteractionMode(mode: string): "default" | "plan" {
 
 function approvalDecisionToPermissionResult(
   decision: ProviderApprovalDecision,
+  request: PermissionRequest,
 ): PermissionRequestResult {
   switch (decision) {
     case "accept":
-    case "acceptForSession":
-      return { kind: "approved" };
+      return { kind: "approve-once" };
+    case "acceptForSession": {
+      const approval = sessionApprovalFromPermissionRequest(request);
+      return approval ? { kind: "approve-for-session", approval } : { kind: "approve-once" };
+    }
     case "cancel":
-      return { kind: "cancelled" };
+      return { kind: "user-not-available" };
     case "decline":
     default:
-      return { kind: "denied-interactively-by-user" };
+      return { kind: "reject" };
+  }
+}
+
+function sessionApprovalFromPermissionRequest(
+  request: PermissionRequest,
+): UserToolSessionApproval | undefined {
+  switch (request.kind) {
+    case "shell": {
+      const commandIdentifiers = request.commands
+        .map((command) => command.identifier.trim())
+        .filter((identifier) => identifier.length > 0);
+      return commandIdentifiers.length > 0 ? { kind: "commands", commandIdentifiers } : undefined;
+    }
+    case "read":
+      return request.path ? undefined : { kind: "read" };
+    case "write":
+      return { kind: "write" };
+    case "mcp":
+      return { kind: "mcp", serverName: request.serverName, toolName: request.toolName };
+    case "memory":
+      return { kind: "memory" };
+    case "custom-tool":
+      return { kind: "custom-tool", toolName: request.toolName };
+    case "extension-management":
+      return {
+        kind: "extension-management",
+        ...(request.operation ? { operation: request.operation } : {}),
+      };
+    case "extension-permission-access":
+      return { kind: "extension-permission-access", extensionName: request.extensionName };
+    default:
+      return undefined;
   }
 }
 
@@ -919,12 +957,13 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
   ) => {
     const onPermissionRequest = (request: PermissionRequest) =>
       getRuntimeMode() === "full-access"
-        ? Promise.resolve<PermissionRequestResult>({ kind: "approved" })
+        ? Promise.resolve<PermissionRequestResult>({ kind: "approve-once" })
         : new Promise<PermissionRequestResult>((resolve) => {
             const requestId = ApprovalRequestId.make(`copilot-approval-${randomUUID()}`);
             const turnId = getCurrentTurnId();
             pendingApprovalResolvers.set(requestId, {
               requestType: requestTypeFromPermissionRequest(request),
+              request,
               turnId,
               resolve,
             });
@@ -1115,7 +1154,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
   const stopRecord = async (record: ActiveCopilotSession) => {
     record.unsubscribe();
     for (const pending of record.pendingApprovalResolvers.values()) {
-      pending.resolve({ kind: "cancelled", reason: "Session stopped." });
+      pending.resolve({ kind: "user-not-available" });
     }
     record.pendingApprovalResolvers.clear();
     for (const pending of record.pendingUserInputResolvers.values()) {
@@ -1481,7 +1520,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
         });
       }
       record.pendingApprovalResolvers.delete(requestId);
-      const resolution = approvalDecisionToPermissionResult(decision);
+      const resolution = approvalDecisionToPermissionResult(decision, pending.request);
       pending.resolve(resolution);
       yield* Queue.offer(
         runtimeEventQueue,
