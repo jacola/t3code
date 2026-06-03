@@ -3,6 +3,7 @@ import {
   type CopilotSettings,
   type ModelCapabilities,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as Data from "effect/Data";
@@ -35,6 +36,20 @@ interface CopilotProbeSnapshot {
     readonly statusMessage?: string | undefined;
   };
   readonly models: ReadonlyArray<ModelInfo>;
+  readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  readonly skillDiscoveryWarning?: string | undefined;
+}
+
+interface CopilotSkillDiscoveryParams {
+  readonly projectPaths?: ReadonlyArray<string> | undefined;
+  readonly skillDirectories?: ReadonlyArray<string> | undefined;
+}
+
+interface CopilotDiscoveredSkill {
+  readonly name: string;
+  readonly description?: string | undefined;
+  readonly userInvocable?: boolean | undefined;
+  readonly enabled?: boolean | undefined;
 }
 
 class CopilotProbeError extends Data.TaggedError("CopilotProbeError")<{
@@ -48,9 +63,12 @@ class CopilotProbeError extends Data.TaggedError("CopilotProbeError")<{
 
 export interface CopilotClientProbeHandle {
   readonly start: () => Promise<void>;
-  readonly getStatus: () => Promise<{ readonly version: string }>;
+  readonly getStatus: () => Promise<{ readonly version?: string | null | undefined }>;
   readonly getAuthStatus: () => Promise<CopilotProbeSnapshot["auth"]>;
   readonly listModels: () => Promise<ModelInfo[]>;
+  readonly discoverSkills: (
+    params: CopilotSkillDiscoveryParams,
+  ) => Promise<ReadonlyArray<CopilotDiscoveredSkill>>;
   readonly stop: () => Promise<Error[]>;
 }
 
@@ -183,6 +201,25 @@ function resolveRuntimeModels(
   );
 }
 
+function slashCommandsFromDiscoveredSkills(
+  skills: ReadonlyArray<CopilotDiscoveredSkill>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const commandsByName = new Map<string, ServerProviderSlashCommand>();
+  for (const skill of skills) {
+    if (skill.enabled !== true || skill.userInvocable !== true) continue;
+    const name = trimText(skill.name);
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (commandsByName.has(key)) continue;
+    const description = trimText(skill.description);
+    commandsByName.set(key, {
+      name,
+      ...(description ? { description } : {}),
+    });
+  }
+  return [...commandsByName.values()];
+}
+
 function toAuthStatus(message: string): "unauthenticated" | "unknown" {
   const normalized = message.toLowerCase();
   return normalized.includes("not authenticated") ||
@@ -199,7 +236,23 @@ function isInstalledFailure(message: string): boolean {
   return !normalized.includes("enoent") && !normalized.includes("not found");
 }
 
-const defaultProbeFactory: CopilotClientProbeFactory = (options) => new CopilotClient(options);
+const defaultProbeFactory: CopilotClientProbeFactory = (options) => {
+  const client = new CopilotClient(options);
+  return {
+    start: () => client.start(),
+    getStatus: () => client.getStatus(),
+    getAuthStatus: () => client.getAuthStatus(),
+    listModels: () => client.listModels(),
+    discoverSkills: async (params) => {
+      const result = await client.rpc.skills.discover({
+        ...(params.projectPaths ? { projectPaths: [...params.projectPaths] } : {}),
+        ...(params.skillDirectories ? { skillDirectories: [...params.skillDirectories] } : {}),
+      });
+      return result.skills;
+    },
+    stop: () => client.stop(),
+  };
+};
 
 export const makePendingCopilotProvider = Effect.fn("makePendingCopilotProvider")(function* (
   settings: CopilotSettings,
@@ -227,6 +280,7 @@ export const checkCopilotProviderStatus = Effect.fn("checkCopilotProviderStatus"
   settings: CopilotSettings,
   environment: NodeJS.ProcessEnv = process.env,
   clientFactory: CopilotClientProbeFactory = defaultProbeFactory,
+  cwd?: string | undefined,
 ) {
   const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
   const emptyModels = fallbackModels(settings);
@@ -266,13 +320,38 @@ export const checkCopilotProviderStatus = Effect.fn("checkCopilotProviderStatus"
     });
   }
 
-  const client = clientFactory(makeCopilotClientOptions({ settings, environment }));
+  const client = clientFactory(
+    makeCopilotClientOptions({
+      settings,
+      environment,
+      ...(cwd ? { cwd } : {}),
+    }),
+  );
+  const skillDiscoveryParams: CopilotSkillDiscoveryParams = cwd ? { projectPaths: [cwd] } : {};
   const probeResult = yield* Effect.tryPromise({
     try: async (): Promise<CopilotProbeSnapshot> => {
       await client.start();
       const [status, auth] = await Promise.all([client.getStatus(), client.getAuthStatus()]);
-      const models = auth.isAuthenticated ? await client.listModels() : [];
-      return { version: status.version ?? null, auth, models };
+      if (!auth.isAuthenticated) {
+        return { version: status.version ?? null, auth, models: [], slashCommands: [] };
+      }
+      const models = await client.listModels();
+      let slashCommands: ReadonlyArray<ServerProviderSlashCommand> = [];
+      let skillDiscoveryWarning: string | undefined;
+      try {
+        slashCommands = slashCommandsFromDiscoveredSkills(
+          await client.discoverSkills(skillDiscoveryParams),
+        );
+      } catch (cause) {
+        skillDiscoveryWarning = toMessage(cause, "Failed to discover GitHub Copilot skills.");
+      }
+      return {
+        version: status.version ?? null,
+        auth,
+        models,
+        slashCommands,
+        ...(skillDiscoveryWarning ? { skillDiscoveryWarning } : {}),
+      };
     },
     catch: (cause) =>
       new CopilotProbeError({
@@ -325,6 +404,11 @@ export const checkCopilotProviderStatus = Effect.fn("checkCopilotProviderStatus"
   }
 
   const snapshot = probeResult.success.value;
+  if (snapshot.skillDiscoveryWarning) {
+    yield* Effect.logWarning("Failed to discover GitHub Copilot skills.", {
+      detail: snapshot.skillDiscoveryWarning,
+    });
+  }
   if (!snapshot.auth.isAuthenticated) {
     return buildServerProvider({
       presentation: GITHUB_COPILOT_PRESENTATION,
@@ -351,6 +435,7 @@ export const checkCopilotProviderStatus = Effect.fn("checkCopilotProviderStatus"
     enabled: true,
     checkedAt,
     models: resolveRuntimeModels(snapshot.models, settings),
+    slashCommands: snapshot.slashCommands,
     skills: [],
     probe: {
       installed: true,

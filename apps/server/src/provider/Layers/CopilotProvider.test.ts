@@ -33,6 +33,7 @@ function makeProbe(overrides?: Partial<CopilotClientProbeHandle>): CopilotClient
         },
       ],
     ),
+    discoverSkills: vi.fn(async () => []),
     stop: vi.fn(async () => []),
     ...overrides,
   };
@@ -69,6 +70,57 @@ describe("checkCopilotProviderStatus", () => {
       type: "select",
       currentValue: "high",
     });
+    expect(snapshot.slashCommands).toEqual([]);
     expect(probe.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps enabled user-invocable Copilot skills to provider slash commands", async () => {
+    const discoverSkills = vi.fn(async () => [
+      {
+        name: "review",
+        description: "Review the current change",
+        source: "project",
+        userInvocable: true,
+        enabled: true,
+      },
+      {
+        name: "disabled-skill",
+        description: "Disabled",
+        source: "project",
+        userInvocable: true,
+        enabled: false,
+      },
+      {
+        name: "internal-skill",
+        description: "Internal",
+        source: "project",
+        userInvocable: false,
+        enabled: true,
+      },
+      {
+        name: " review ",
+        description: "Duplicate",
+        source: "project",
+        userInvocable: true,
+        enabled: true,
+      },
+    ]);
+    const probe = makeProbe({ discoverSkills });
+    const snapshot = await Effect.runPromise(
+      checkCopilotProviderStatus(
+        decodeCopilotSettings({ enabled: true }),
+        {},
+        () => probe,
+        "/repo/project",
+      ),
+    );
+
+    expect(discoverSkills).toHaveBeenCalledWith({ projectPaths: ["/repo/project"] });
+    expect(snapshot.slashCommands).toEqual([
+      {
+        name: "review",
+        description: "Review the current change",
+      },
+    ]);
   });
 });

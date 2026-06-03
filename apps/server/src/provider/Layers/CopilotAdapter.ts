@@ -109,6 +109,64 @@ interface CopilotSessionConfiguration {
   readonly reasoningEffort: CopilotReasoningEffort | undefined;
 }
 
+interface CopilotSlashCommandInfo {
+  readonly name: string;
+  readonly aliases?: ReadonlyArray<string>;
+  readonly kind?: "builtin" | "skill" | "client" | string;
+}
+
+interface CopilotSlashCommandList {
+  readonly commands: ReadonlyArray<CopilotSlashCommandInfo>;
+}
+
+interface CopilotSlashCommandTextResult {
+  readonly kind: "text";
+  readonly text: string;
+  readonly markdown?: boolean;
+  readonly preserveAnsi?: boolean;
+  readonly runtimeSettingsChanged?: boolean;
+}
+
+interface CopilotSlashCommandAgentPromptResult {
+  readonly kind: "agent-prompt";
+  readonly prompt: string;
+  readonly displayPrompt: string;
+  readonly mode?: string;
+  readonly runtimeSettingsChanged?: boolean;
+}
+
+interface CopilotSlashCommandCompletedResult {
+  readonly kind: "completed";
+  readonly message?: string;
+  readonly runtimeSettingsChanged?: boolean;
+}
+
+interface CopilotSlashCommandSelectSubcommandResult {
+  readonly kind: "select-subcommand";
+  readonly command: string;
+  readonly title: string;
+  readonly options: ReadonlyArray<{
+    readonly name: string;
+    readonly description: string;
+    readonly group?: string;
+  }>;
+  readonly runtimeSettingsChanged?: boolean;
+}
+
+type CopilotSlashCommandInvocationResult =
+  | CopilotSlashCommandTextResult
+  | CopilotSlashCommandAgentPromptResult
+  | CopilotSlashCommandCompletedResult
+  | CopilotSlashCommandSelectSubcommandResult;
+
+interface ParsedCopilotSlashCommand {
+  readonly name: string;
+  readonly input: string | undefined;
+  readonly originalPrompt: string;
+}
+
+type CopilotSendAgentMode = NonNullable<MessageOptions["agentMode"]>;
+
 interface CopilotSessionHandle {
   readonly sessionId: string;
   readonly rpc: {
@@ -123,6 +181,17 @@ interface CopilotSessionHandle {
         readonly content: string | null;
         readonly path: string | null;
       }>;
+    };
+    readonly commands: {
+      readonly list: (input?: {
+        readonly includeBuiltins?: boolean;
+        readonly includeSkills?: boolean;
+        readonly includeClientCommands?: boolean;
+      }) => Promise<CopilotSlashCommandList>;
+      readonly invoke: (input: {
+        readonly name: string;
+        readonly input?: string;
+      }) => Promise<CopilotSlashCommandInvocationResult>;
     };
   };
   readonly on: (handler: (event: SessionEvent) => void) => () => void;
@@ -258,6 +327,42 @@ function toCopilotSessionMode(interactionMode: "default" | "plan"): "interactive
 
 function toInteractionMode(mode: string): "default" | "plan" {
   return mode === "plan" ? "plan" : "default";
+}
+
+function parseCopilotSlashCommand(
+  input: string | undefined,
+): ParsedCopilotSlashCommand | undefined {
+  const prompt = input?.trimStart();
+  if (!prompt?.startsWith("/") || prompt.startsWith("//")) return undefined;
+  const withoutSlash = prompt.slice(1);
+  const separatorIndex = withoutSlash.search(/\s/);
+  const rawName = separatorIndex >= 0 ? withoutSlash.slice(0, separatorIndex) : withoutSlash;
+  const name = trimToUndefined(rawName);
+  if (!name) return undefined;
+  const rawInput = separatorIndex >= 0 ? withoutSlash.slice(separatorIndex).trimStart() : undefined;
+  return {
+    name,
+    input: trimToUndefined(rawInput),
+    originalPrompt: input ?? "",
+  };
+}
+
+function copilotCommandMatchesName(command: CopilotSlashCommandInfo, name: string): boolean {
+  const normalizedName = name.toLowerCase();
+  if (command.name.toLowerCase() === normalizedName) return true;
+  return (command.aliases ?? []).some((alias) => alias.toLowerCase() === normalizedName);
+}
+
+function toCopilotSendAgentMode(mode: string | undefined, fallback: CopilotSendAgentMode) {
+  switch (mode) {
+    case "interactive":
+    case "plan":
+    case "autopilot":
+    case "shell":
+      return mode;
+    default:
+      return fallback;
+  }
 }
 
 function approvalDecisionToPermissionResult(
@@ -549,6 +654,146 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
         ).pipe(Effect.asVoid);
       }),
     );
+
+  const emitCompletedSlashCommandTurn = (
+    record: ActiveCopilotSession,
+    turnId: TurnId,
+    result: CopilotSlashCommandTextResult | CopilotSlashCommandCompletedResult,
+  ) => {
+    const message =
+      result.kind === "text" ? trimToUndefined(result.text) : trimToUndefined(result.message);
+    const itemId = message ? `copilot-command-${randomUUID()}` : undefined;
+    const events: ProviderRuntimeEvent[] = [
+      makeSyntheticEvent(
+        boundInstanceId,
+        record.threadId,
+        "turn.started",
+        record.model ? { model: record.model } : {},
+        { turnId },
+      ),
+      makeSyntheticEvent(boundInstanceId, record.threadId, "session.state.changed", {
+        state: "running",
+        reason: "slash-command.invoked",
+      }),
+      ...(message && itemId
+        ? [
+            makeSyntheticEvent(
+              boundInstanceId,
+              record.threadId,
+              "content.delta",
+              { streamKind: "assistant_text", delta: message },
+              { turnId, itemId },
+            ),
+            makeSyntheticEvent(
+              boundInstanceId,
+              record.threadId,
+              "item.completed",
+              {
+                itemType: "assistant_message",
+                status: "completed",
+                title: "GitHub Copilot command",
+                detail: message,
+                data: result,
+              },
+              { turnId, itemId },
+            ),
+          ]
+        : []),
+      makeSyntheticEvent(
+        boundInstanceId,
+        record.threadId,
+        "turn.completed",
+        { state: "completed" },
+        { turnId },
+      ),
+      makeSyntheticEvent(boundInstanceId, record.threadId, "session.state.changed", {
+        state: "ready",
+        reason: "slash-command.completed",
+      }),
+      makeSyntheticEvent(boundInstanceId, record.threadId, "thread.state.changed", {
+        state: "idle",
+        detail: result,
+      }),
+    ];
+    record.pendingTurnIds = record.pendingTurnIds.filter((candidate) => candidate !== turnId);
+    clearTurnTracking(record);
+    return Queue.offerAll(runtimeEventQueue, events).pipe(Effect.asVoid);
+  };
+
+  const dispatchCopilotSkillSlashCommand = (input: {
+    readonly record: ActiveCopilotSession;
+    readonly command: ParsedCopilotSlashCommand;
+    readonly turnId: TurnId;
+    readonly fallbackAgentMode: CopilotSendAgentMode;
+  }): Effect.Effect<
+    | { readonly kind: "send"; readonly prompt: string; readonly agentMode: CopilotSendAgentMode }
+    | { readonly kind: "completed" },
+    ProviderAdapterRequestError
+  > =>
+    Effect.gen(function* () {
+      const commandList = yield* Effect.tryPromise({
+        try: () =>
+          input.record.session.rpc.commands.list({
+            includeBuiltins: false,
+            includeSkills: true,
+            includeClientCommands: false,
+          }),
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.commands.list",
+            detail: toMessage(cause, "Failed to list GitHub Copilot slash commands."),
+            cause,
+          }),
+      });
+      const skillCommand = commandList.commands.find(
+        (command) =>
+          command.kind === "skill" && copilotCommandMatchesName(command, input.command.name),
+      );
+      if (!skillCommand) {
+        return {
+          kind: "send" as const,
+          prompt: input.command.originalPrompt,
+          agentMode: input.fallbackAgentMode,
+        };
+      }
+
+      const invocationResult = yield* Effect.tryPromise({
+        try: () =>
+          input.record.session.rpc.commands.invoke({
+            name: skillCommand.name,
+            ...(input.command.input ? { input: input.command.input } : {}),
+          }),
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.commands.invoke",
+            detail: toMessage(cause, "Failed to invoke GitHub Copilot slash command."),
+            cause,
+          }),
+      });
+
+      switch (invocationResult.kind) {
+        case "agent-prompt":
+          return {
+            kind: "send" as const,
+            prompt: invocationResult.prompt,
+            agentMode: toCopilotSendAgentMode(invocationResult.mode, input.fallbackAgentMode),
+          };
+        case "text":
+        case "completed":
+          yield* emitCompletedSlashCommandTurn(input.record, input.turnId, invocationResult);
+          return { kind: "completed" as const };
+        case "select-subcommand": {
+          const options = invocationResult.options.map((option) => option.name).join(", ");
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.commands.invoke",
+            detail: `GitHub Copilot slash command '/${invocationResult.command}' requires subcommand selection, which T3 Code does not support yet.${options ? ` Available subcommands: ${options}.` : ""}`,
+          });
+        }
+      }
+    });
 
   const mapSessionEvent = (
     record: ActiveCopilotSession,
@@ -1295,6 +1540,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
             ...(input.cwd ? { workingDirectory: input.cwd } : {}),
             ...(configDir ? { configDir } : {}),
             ...(mcpServers ? { mcpServers } : {}),
+            enableConfigDiscovery: true,
             streaming: true,
           };
           return resumeSessionId
@@ -1342,6 +1588,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
               ? { reasoningEffort: sessionConfiguration.reasoningEffort }
               : {}),
             ...(configDir ? { configDir } : {}),
+            enableConfigDiscovery: true,
             streaming: true,
           },
         }),
@@ -1444,27 +1691,44 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
 
             const interactionMode = input.interactionMode ?? record.interactionMode ?? "default";
             yield* syncInteractionMode(record, interactionMode);
+            const agentMode = toCopilotSessionMode(interactionMode);
 
             const turnId = TurnId.make(`copilot-turn-${randomUUID()}`);
             record.pendingTurnIds.push(turnId);
             record.currentTurnId = turnId;
             record.currentProviderTurnId = undefined;
 
-            yield* Effect.tryPromise({
-              try: () =>
-                record.session.send({
-                  prompt: input.input ?? "",
-                  ...(attachments && attachments.length > 0 ? { attachments } : {}),
-                  mode: "immediate",
-                  agentMode: toCopilotSessionMode(interactionMode),
-                }),
-              catch: (cause) =>
-                new ProviderAdapterRequestError({
-                  provider: PROVIDER,
-                  method: "session.send",
-                  detail: toMessage(cause, "Failed to send GitHub Copilot turn."),
-                  cause,
-                }),
+            yield* Effect.gen(function* () {
+              const parsedSlashCommand =
+                attachments && attachments.length > 0
+                  ? undefined
+                  : parseCopilotSlashCommand(input.input);
+              const dispatch = parsedSlashCommand
+                ? yield* dispatchCopilotSkillSlashCommand({
+                    record,
+                    command: parsedSlashCommand,
+                    turnId,
+                    fallbackAgentMode: agentMode,
+                  })
+                : { kind: "send" as const, prompt: input.input ?? "", agentMode };
+              if (dispatch.kind === "completed") return;
+
+              yield* Effect.tryPromise({
+                try: () =>
+                  record.session.send({
+                    prompt: dispatch.prompt,
+                    ...(attachments && attachments.length > 0 ? { attachments } : {}),
+                    mode: "immediate",
+                    agentMode: dispatch.agentMode,
+                  }),
+                catch: (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session.send",
+                    detail: toMessage(cause, "Failed to send GitHub Copilot turn."),
+                    cause,
+                  }),
+              });
             }).pipe(
               Effect.tapError(() =>
                 Effect.sync(() => {

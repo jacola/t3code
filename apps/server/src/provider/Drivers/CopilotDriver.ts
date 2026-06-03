@@ -66,6 +66,7 @@ export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = 
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const eventLoggers = yield* ProviderEventLoggers;
+      const serverConfig = yield* ServerConfig;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const effectiveConfig = { ...config, enabled } satisfies CopilotSettings;
       const continuationIdentity = defaultProviderContinuationIdentity({
@@ -97,9 +98,12 @@ export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = 
         haveSettingsChanged: () => false,
         initialSnapshot: (settings) =>
           makePendingCopilotProvider(settings).pipe(Effect.map(stampIdentity)),
-        checkProvider: checkCopilotProviderStatus(effectiveConfig, processEnv).pipe(
-          Effect.map(stampIdentity),
-        ),
+        checkProvider: checkCopilotProviderStatus(
+          effectiveConfig,
+          processEnv,
+          undefined,
+          serverConfig.cwd,
+        ).pipe(Effect.map(stampIdentity)),
         refreshInterval: SNAPSHOT_REFRESH_INTERVAL,
       }).pipe(
         Effect.mapError(
