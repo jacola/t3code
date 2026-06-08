@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 import type { MessageOptions, ModelInfo, SessionEvent } from "@github/copilot-sdk";
 import { CopilotSettings, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -115,80 +115,25 @@ function makeHarness() {
 }
 
 describe("CopilotAdapter", () => {
-  it("invokes skill-backed slash commands and sends the returned agent prompt", async () => {
-    const harness = makeHarness();
-    harness.client.session.commandList = {
-      commands: [
-        {
-          name: "review",
-          kind: "skill",
-        },
-      ],
-    };
-    harness.client.session.commandInvocationResult = {
-      kind: "agent-prompt",
-      prompt: "Run the review skill for src/server.ts",
-      displayPrompt: "/review src/server.ts",
-      mode: "plan",
-    };
-
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const adapter = yield* harness.makeAdapter;
-          yield* adapter.startSession({
-            threadId: THREAD_ID,
-            provider: ProviderDriverKind.make("githubCopilot"),
-            runtimeMode: "approval-required",
-          });
-          yield* adapter.sendTurn({
-            threadId: THREAD_ID,
-            input: "/review src/server.ts",
-            interactionMode: "default",
-          });
-        }).pipe(Effect.provide(harness.layer)),
-      ),
-    );
-
-    expect(harness.client.createSessionCalls[0]).toMatchObject({
-      enableConfigDiscovery: true,
-      streaming: true,
-    });
-    expect(harness.client.session.commandListCalls).toEqual([
-      {
-        includeBuiltins: false,
-        includeSkills: true,
-        includeClientCommands: false,
-      },
-    ]);
-    expect(harness.client.session.commandInvokeCalls).toEqual([
-      {
-        name: "review",
-        input: "src/server.ts",
-      },
-    ]);
-    expect(harness.client.session.sendCalls).toEqual([
-      {
+  it.effect("invokes skill-backed slash commands and sends the returned agent prompt", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness();
+      harness.client.session.commandList = {
+        commands: [
+          {
+            name: "review",
+            kind: "skill",
+          },
+        ],
+      };
+      harness.client.session.commandInvocationResult = {
+        kind: "agent-prompt",
         prompt: "Run the review skill for src/server.ts",
-        mode: "immediate",
-        agentMode: "plan",
-      },
-    ]);
-  });
+        displayPrompt: "/review src/server.ts",
+        mode: "plan",
+      };
 
-  it("leaves non-skill slash prompts as normal Copilot messages", async () => {
-    const harness = makeHarness();
-    harness.client.session.commandList = {
-      commands: [
-        {
-          name: "review",
-          kind: "builtin",
-        },
-      ],
-    };
-
-    await Effect.runPromise(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const adapter = yield* harness.makeAdapter;
           yield* adapter.startSession({
@@ -202,16 +147,71 @@ describe("CopilotAdapter", () => {
             interactionMode: "default",
           });
         }).pipe(Effect.provide(harness.layer)),
-      ),
-    );
+      );
 
-    expect(harness.client.session.commandInvokeCalls).toEqual([]);
-    expect(harness.client.session.sendCalls).toEqual([
-      {
-        prompt: "/review src/server.ts",
-        mode: "immediate",
-        agentMode: "interactive",
-      },
-    ]);
-  });
+      expect(harness.client.createSessionCalls[0]).toMatchObject({
+        enableConfigDiscovery: true,
+        streaming: true,
+      });
+      expect(harness.client.session.commandListCalls).toEqual([
+        {
+          includeBuiltins: false,
+          includeSkills: true,
+          includeClientCommands: false,
+        },
+      ]);
+      expect(harness.client.session.commandInvokeCalls).toEqual([
+        {
+          name: "review",
+          input: "src/server.ts",
+        },
+      ]);
+      expect(harness.client.session.sendCalls).toEqual([
+        {
+          prompt: "Run the review skill for src/server.ts",
+          mode: "immediate",
+          agentMode: "plan",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("leaves non-skill slash prompts as normal Copilot messages", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness();
+      harness.client.session.commandList = {
+        commands: [
+          {
+            name: "review",
+            kind: "builtin",
+          },
+        ],
+      };
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const adapter = yield* harness.makeAdapter;
+          yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("githubCopilot"),
+            runtimeMode: "approval-required",
+          });
+          yield* adapter.sendTurn({
+            threadId: THREAD_ID,
+            input: "/review src/server.ts",
+            interactionMode: "default",
+          });
+        }).pipe(Effect.provide(harness.layer)),
+      );
+
+      expect(harness.client.session.commandInvokeCalls).toEqual([]);
+      expect(harness.client.session.sendCalls).toEqual([
+        {
+          prompt: "/review src/server.ts",
+          mode: "immediate",
+          agentMode: "interactive",
+        },
+      ]);
+    }),
+  );
 });
