@@ -15,6 +15,7 @@ export type TextGenerationProvider =
   | "claudeAgent"
   | "cursor"
   | "githubCopilot"
+  | "grok"
   | "opencode";
 
 export interface CommitMessageGenerationInput {

@@ -159,6 +159,7 @@ function createBaseServerConfig(): ServerConfig {
         },
         cursor: { enabled: true, binaryPath: "", apiEndpoint: "", customModels: [] },
         githubCopilot: { enabled: false, binaryPath: "", homePath: "", customModels: [] },
+        grok: { enabled: true, binaryPath: "", customModels: [] },
         opencode: {
           enabled: true,
           binaryPath: "",
