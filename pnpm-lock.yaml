@@ -386,7 +386,7 @@ importers:
         specifier: 4.0.0-beta.78
         version: 4.0.0-beta.78(effect@4.0.0-beta.78(patch_hash=883249d8efbb462e928e21fefef96027b66aec50751178cafdce45f08eee3754))
       '@github/copilot-sdk':
-        specifier: ^1.0.0-beta.9
+        specifier: ^1.0.0
         version: 1.0.0
       '@opencode-ai/sdk':
         specifier: ^1.3.15
