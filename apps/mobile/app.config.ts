@@ -17,6 +17,7 @@ const VARIANT_CONFIG: Record<
     readonly iosIcon: string;
     readonly iosBundleIdentifier: string;
     readonly androidPackage: string;
+    readonly relyingParty?: string;
   }
 > = {
   development: {
@@ -25,6 +26,7 @@ const VARIANT_CONFIG: Record<
     iosIcon: "./assets/icon-composer-dev.icon",
     iosBundleIdentifier: "com.t3tools.t3code.dev",
     androidPackage: "com.t3tools.t3code.dev",
+    relyingParty: "clerk.t3.codes",
   },
   preview: {
     appName: "T3 Code Preview",
@@ -32,6 +34,7 @@ const VARIANT_CONFIG: Record<
     iosIcon: "./assets/icon-composer-prod.icon",
     iosBundleIdentifier: "com.t3tools.t3code.preview",
     androidPackage: "com.t3tools.t3code.preview",
+    relyingParty: "clerk.t3.codes",
   },
   production: {
     appName: "T3 Code",
@@ -39,6 +42,7 @@ const VARIANT_CONFIG: Record<
     iosIcon: "./assets/icon-composer-prod.icon",
     iosBundleIdentifier: "com.t3tools.t3code",
     androidPackage: "com.t3tools.t3code",
+    relyingParty: "clerk.t3.codes",
   },
 };
 
@@ -77,6 +81,14 @@ const config: ExpoConfig = {
     icon: variant.iosIcon,
     supportsTablet: true,
     bundleIdentifier: variant.iosBundleIdentifier,
+    // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
+    // does not fall back to a personal team (which cannot sign app groups,
+    // Sign in with Apple, or push notification entitlements).
+    appleTeamId: "ARK85ZXQ4Z",
+    associatedDomains: [
+      `applinks:${variant.relyingParty}`,
+      `webcredentials:${variant.relyingParty}`,
+    ],
     infoPlist: {
       NSAppTransportSecurity: {
         NSAllowsArbitraryLoads: true,
@@ -101,7 +113,6 @@ const config: ExpoConfig = {
     favicon: "./assets/favicon.png",
   },
   plugins: [
-    "expo-router",
     "expo-font",
     "expo-secure-store",
     ["@clerk/expo", { theme: "./clerk-theme.json" }],
@@ -131,9 +142,15 @@ const config: ExpoConfig = {
       {
         ios: {
           deploymentTarget: "18.0",
+          // AppCheckCore 11.3+ includes Swift and needs module maps for these Objective-C dependencies.
+          extraPods: [
+            { name: "GoogleUtilities", modular_headers: true },
+            { name: "RecaptchaInterop", modular_headers: true },
+          ],
         },
       },
     ],
+    "./plugins/withIosCocoaPodsUuidCache.cjs",
     [
       "expo-widgets",
       {
@@ -150,6 +167,7 @@ const config: ExpoConfig = {
         ],
       },
     ],
+    "./plugins/withIosSceneLifecycle.cjs",
     "./plugins/withAndroidCleartextTraffic.cjs",
   ],
   extra: {
