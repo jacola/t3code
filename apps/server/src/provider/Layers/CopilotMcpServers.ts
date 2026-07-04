@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import fsp from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import type { MCPServerConfig } from "@github/copilot-sdk";
 
@@ -88,12 +88,14 @@ export async function loadCopilotMcpServers(
   configDir: string | undefined,
 ): Promise<Record<string, MCPServerConfig> | undefined> {
   const baseDir =
-    configDir && configDir.trim().length > 0 ? configDir : path.join(os.homedir(), ".copilot");
-  const configPath = path.join(baseDir, "mcp-config.json");
+    configDir && configDir.trim().length > 0
+      ? configDir
+      : NodePath.join(NodeOS.homedir(), ".copilot");
+  const configPath = NodePath.join(baseDir, "mcp-config.json");
 
   let raw: string;
   try {
-    raw = await fsp.readFile(configPath, "utf8");
+    raw = await NodeFSP.readFile(configPath, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return undefined;

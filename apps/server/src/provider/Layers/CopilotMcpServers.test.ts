@@ -1,17 +1,17 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 
 import { loadCopilotMcpServers } from "./CopilotMcpServers.ts";
 
 describe("loadCopilotMcpServers", () => {
   it("normalizes local and remote MCP server configs", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "t3-copilot-mcp-"));
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-copilot-mcp-"));
     try {
-      writeFileSync(
-        path.join(dir, "mcp-config.json"),
+      NodeFS.writeFileSync(
+        NodePath.join(dir, "mcp-config.json"),
         JSON.stringify({
           mcpServers: {
             local: {
@@ -47,7 +47,7 @@ describe("loadCopilotMcpServers", () => {
         },
       });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      NodeFS.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { existsSync } from "node:fs";
+import * as NodeFS from "node:fs";
 
 import { RuntimeConnection, type CopilotClientOptions } from "@github/copilot-sdk";
 import { ProviderDriverKind, type CopilotSettings } from "@t3tools/contracts";
@@ -46,7 +46,7 @@ export function isCopilotCliPathOverrideMissing(
   settings: Pick<CopilotSettings, "binaryPath">,
 ): boolean {
   const cliPath = normalizeCopilotCliPathOverride(settings.binaryPath);
-  return cliPath !== undefined && !existsSync(cliPath);
+  return cliPath !== undefined && !NodeFS.existsSync(cliPath);
 }
 
 export function makeCopilotClientOptions(input: {

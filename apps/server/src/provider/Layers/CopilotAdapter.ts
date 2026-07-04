@@ -1,6 +1,6 @@
 // @effect-diagnostics globalDate:off
 // @effect-diagnostics globalDateInEffect:off
-import { randomUUID } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import {
   CopilotClient,
@@ -240,7 +240,7 @@ function toMessage(cause: unknown, fallback: string): string {
 }
 
 function makeEventId(prefix: string): EventId {
-  return EventId.make(`${prefix}-${randomUUID()}`);
+  return EventId.make(`${prefix}-${NodeCrypto.randomUUID()}`);
 }
 
 function toTurnId(value: string | undefined): TurnId | undefined {
@@ -662,7 +662,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
   ) => {
     const message =
       result.kind === "text" ? trimToUndefined(result.text) : trimToUndefined(result.message);
-    const itemId = message ? `copilot-command-${randomUUID()}` : undefined;
+    const itemId = message ? `copilot-command-${NodeCrypto.randomUUID()}` : undefined;
     const events: ProviderRuntimeEvent[] = [
       makeSyntheticEvent(
         boundInstanceId,
@@ -1204,7 +1204,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
       getRuntimeMode() === "full-access"
         ? Promise.resolve<PermissionRequestResult>({ kind: "approve-once" })
         : new Promise<PermissionRequestResult>((resolve) => {
-            const requestId = ApprovalRequestId.make(`copilot-approval-${randomUUID()}`);
+            const requestId = ApprovalRequestId.make(`copilot-approval-${NodeCrypto.randomUUID()}`);
             const turnId = getCurrentTurnId();
             pendingApprovalResolvers.set(requestId, {
               requestType: requestTypeFromPermissionRequest(request),
@@ -1235,7 +1235,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
       readonly allowFreeform?: boolean;
     }) =>
       new Promise<{ readonly answer: string; readonly wasFreeform: boolean }>((resolve) => {
-        const requestId = ApprovalRequestId.make(`copilot-user-input-${randomUUID()}`);
+        const requestId = ApprovalRequestId.make(`copilot-user-input-${NodeCrypto.randomUUID()}`);
         const turnId = getCurrentTurnId();
         pendingUserInputResolvers.set(requestId, { request, turnId, resolve });
         void emitRuntimeEvents([
@@ -1693,7 +1693,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
             yield* syncInteractionMode(record, interactionMode);
             const agentMode = toCopilotSessionMode(interactionMode);
 
-            const turnId = TurnId.make(`copilot-turn-${randomUUID()}`);
+            const turnId = TurnId.make(`copilot-turn-${NodeCrypto.randomUUID()}`);
             record.pendingTurnIds.push(turnId);
             record.currentTurnId = turnId;
             record.currentProviderTurnId = undefined;
