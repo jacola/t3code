@@ -6,22 +6,24 @@ import {
   View,
   type LayoutChangeEvent,
   type NativeSyntheticEvent,
+  type TextInputInstance,
   type ViewProps,
-  useColorScheme,
 } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
   getNativeTerminalHardwareKeyRevision,
   resolveNativeTerminalSurfaceView,
 } from "./nativeTerminalModule";
 import {
   buildGhosttyThemeConfig,
-  getPierreTerminalTheme,
+  getMobileTerminalTheme,
   type TerminalTheme,
 } from "./terminalTheme";
 import { terminalDebugLog } from "./terminalDebugLog";
+import { useTerminalSurfaceBuffer } from "./useTerminalSurfaceBuffer";
 
 interface TerminalInputEvent {
   readonly data: string;
@@ -34,14 +36,22 @@ interface TerminalResizeEvent {
 
 interface TerminalSurfaceProps extends ViewProps {
   readonly terminalKey: string;
-  readonly buffer: string;
+  readonly buffer: string | null;
   readonly fontSize?: number;
   readonly isRunning: boolean;
+  readonly readOnly?: boolean;
+  readonly autoFocus?: boolean;
   readonly keyboardFocusRequest?: number;
+  readonly captureRequest?: number;
+  readonly onCapture?: (text: string) => void;
   readonly theme?: TerminalTheme;
   readonly onInput: (data: string) => void;
   readonly onResize: (size: { readonly cols: number; readonly rows: number }) => void;
 }
+
+type ReadyTerminalSurfaceProps = Omit<TerminalSurfaceProps, "buffer"> & {
+  readonly buffer: string;
+};
 
 function estimateGridSize(input: {
   readonly width: number;
@@ -56,14 +66,18 @@ function estimateGridSize(input: {
   };
 }
 
-const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: TerminalSurfaceProps) {
+const FallbackTerminalSurface = memo(function FallbackTerminalSurface(
+  props: ReadyTerminalSurfaceProps,
+) {
   const fontSize = props.fontSize ?? MOBILE_TYPOGRAPHY.label.fontSize;
-  const inputRef = useRef<TextInput>(null);
-  const appearanceScheme = useColorScheme() === "light" ? "light" : "dark";
-  const theme = props.theme ?? getPierreTerminalTheme(appearanceScheme);
-  const statusLabel = props.isRunning
-    ? "Native terminal unavailable. Using text fallback."
-    : "Open terminal to start a shell.";
+  const inputRef = useRef<TextInputInstance>(null);
+  const { themeAppearance, themeId } = useAppearancePreferences();
+  const theme = props.theme ?? getMobileTerminalTheme(themeId, themeAppearance);
+  const statusLabel = props.readOnly
+    ? "Viewing terminal output."
+    : props.isRunning
+      ? "Native terminal unavailable. Using text fallback."
+      : "Open terminal to start a shell.";
 
   const handleLayout = (event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -71,20 +85,20 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
   };
 
   useEffect(() => {
-    if ((props.keyboardFocusRequest ?? 0) > 0) {
+    if (!props.readOnly && (props.keyboardFocusRequest ?? 0) > 0) {
       inputRef.current?.blur();
       const focusFrame = requestAnimationFrame(() => inputRef.current?.focus());
       return () => cancelAnimationFrame(focusFrame);
     }
 
     return undefined;
-  }, [props.keyboardFocusRequest]);
+  }, [props.keyboardFocusRequest, props.readOnly]);
 
   return (
     <View
+      className="flex-1"
       style={[
         {
-          flex: 1,
           backgroundColor: theme.background,
           borderRadius: 8,
           overflow: "hidden",
@@ -93,19 +107,18 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
       ]}
       onLayout={handleLayout}
     >
-      <View style={{ flex: 1, paddingHorizontal: 10, paddingVertical: 8 }}>
+      <View className="flex-1 px-2.5 py-2">
         <Text
-          className="text-2xs"
+          className="pb-2 text-2xs"
           style={{
             color: theme.mutedForeground,
-            paddingBottom: 8,
           }}
         >
           {statusLabel}
         </Text>
         <ScrollView
-          style={{ flex: 1 }}
-          contentContainerStyle={{ paddingBottom: 12 }}
+          className="flex-1"
+          contentContainerClassName="pb-3"
           showsVerticalScrollIndicator={false}
         >
           <Text
@@ -122,13 +135,9 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
         </ScrollView>
       </View>
       <View
+        className="flex-row items-center gap-2 border-t p-2"
         style={{
-          borderTopWidth: 1,
           borderTopColor: theme.border,
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 8,
-          padding: 8,
         }}
       >
         <TextInput
@@ -136,7 +145,7 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
           autoCapitalize="none"
           autoCorrect={false}
           blurOnSubmit={false}
-          editable={props.isRunning}
+          editable={props.isRunning && !props.readOnly}
           placeholder="type and press return"
           placeholderTextColor={theme.mutedForeground}
           returnKeyType="send"
@@ -150,14 +159,15 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
           onSubmitEditing={(event) => {
             const text = event.nativeEvent.text;
             if (text.length > 0) {
-              props.onInput(`${text}\n`);
+              // Terminal Enter is CR. LF is Ctrl+J and raw-mode TUIs can treat it as J.
+              props.onInput(`${text}\r`);
             }
           }}
         />
         <Pressable
-          disabled={!props.isRunning}
+          disabled={!props.isRunning || props.readOnly}
           style={({ pressed }) => ({
-            opacity: !props.isRunning ? 0.35 : pressed ? 0.65 : 1,
+            opacity: !props.isRunning || props.readOnly ? 0.35 : pressed ? 0.65 : 1,
             paddingHorizontal: 10,
             paddingVertical: 6,
             borderRadius: 8,
@@ -165,13 +175,7 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
           })}
           onPress={() => props.onInput("\u0003")}
         >
-          <Text
-            className="text-2xs"
-            style={{
-              color: theme.foreground,
-              fontFamily: "DMSans_700Bold",
-            }}
-          >
+          <Text className="text-2xs font-t3-bold" style={{ color: theme.foreground }}>
             Ctrl-C
           </Text>
         </Pressable>
@@ -181,9 +185,14 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
 });
 
 export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurfaceProps) {
+  const buffer = useTerminalSurfaceBuffer(props);
+  return <ReadyTerminalSurface {...props} buffer={buffer} />;
+});
+
+const ReadyTerminalSurface = memo(function ReadyTerminalSurface(props: ReadyTerminalSurfaceProps) {
   const fontSize = props.fontSize ?? MOBILE_TYPOGRAPHY.label.fontSize;
-  const appearanceScheme = useColorScheme() === "light" ? "light" : "dark";
-  const theme = props.theme ?? getPierreTerminalTheme(appearanceScheme);
+  const { themeAppearance, themeId } = useAppearancePreferences();
+  const theme = props.theme ?? getMobileTerminalTheme(themeId, themeAppearance);
   const { onInput, onResize } = props;
   const NativeTerminalSurfaceView = resolveNativeTerminalSurfaceView();
   const hasNativeSurface = Boolean(NativeTerminalSurfaceView);
@@ -192,7 +201,6 @@ export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurf
     terminalDebugLog("native:surface", {
       terminalKey: props.terminalKey,
       native: hasNativeSurface,
-      // null = installed binary predates native hardware-key handling (rebuild needed).
       hardwareKeyRevision: getNativeTerminalHardwareKeyRevision(),
       bufferLen: props.buffer.length,
       isRunning: props.isRunning,
@@ -200,7 +208,7 @@ export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurf
   }, [hasNativeSurface, props.buffer.length, props.isRunning, props.terminalKey]);
   const handleNativeInput = useCallback(
     (event: NativeSyntheticEvent<TerminalInputEvent>) => {
-      if (!props.isRunning) {
+      if (!props.isRunning || props.readOnly) {
         return;
       }
       terminalDebugLog("native:onInput", {
@@ -208,7 +216,7 @@ export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurf
       });
       onInput(event.nativeEvent.data);
     },
-    [onInput, props.isRunning],
+    [onInput, props.isRunning, props.readOnly],
   );
   const handleNativeResize = useCallback(
     (event: NativeSyntheticEvent<TerminalResizeEvent>) => {
@@ -224,9 +232,11 @@ export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurf
     return (
       <View style={props.style}>
         <NativeTerminalSurfaceView
-          appearanceScheme={appearanceScheme}
+          appearanceScheme={themeAppearance}
+          autoFocus={!props.readOnly && (props.autoFocus ?? true)}
+          readOnly={props.readOnly ?? false}
           backgroundColor={theme.background}
-          focusRequest={props.isRunning ? (props.keyboardFocusRequest ?? 0) : 0}
+          focusRequest={props.isRunning && !props.readOnly ? (props.keyboardFocusRequest ?? 0) : 0}
           foregroundColor={theme.foreground}
           mutedForegroundColor={theme.mutedForeground}
           terminalKey={props.terminalKey}
@@ -236,6 +246,8 @@ export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurf
           themeConfig={buildGhosttyThemeConfig(theme)}
           onInput={handleNativeInput}
           onResize={handleNativeResize}
+          captureRequest={props.captureRequest}
+          onCapture={(event) => props.onCapture?.(event.nativeEvent.text)}
         />
       </View>
     );

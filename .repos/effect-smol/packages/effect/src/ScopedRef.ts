@@ -1,23 +1,11 @@
 /**
- * The `ScopedRef` module provides a mutable reference for values that are tied
- * to scoped resources. Each value stored in a `ScopedRef` is acquired within its
- * own `Scope`, and replacing the value safely releases the resources associated
- * with the previous value.
+ * Stores a current value together with the scope that owns it.
  *
- * Use `ScopedRef` when an application needs to keep a current resource-backed
- * value, such as a live client, connection, subscription, or cached handle, and
- * later swap it for a newly acquired value without leaking the old resources.
- * Reads are simple, while updates are synchronized and resource-safe.
- *
- * **Gotchas**
- *
- * - A `ScopedRef` must itself be created and used within a `Scope`; when that
- *   scope closes, the currently stored value is finalized.
- * - Use {@link fromAcquire} or {@link set} for resourceful values so acquisition
- *   and finalization are tracked correctly.
- * - Use {@link make} only for values that do not acquire resources.
- * - Updating a `ScopedRef` waits for the replacement acquisition and old
- *   finalization to complete before returning.
+ * A `ScopedRef<A>` is useful for resource-backed values such as clients,
+ * connections, subscriptions, or handles. Replacing the value acquires the
+ * replacement in a new scope and releases the resources owned by the previous
+ * value. Reads can be effectful or synchronous, and updates are synchronized so
+ * only one replacement happens at a time.
  *
  * @since 2.0.0
  */
@@ -63,18 +51,26 @@ const Proto = {
   }
 }
 
+interface ScopedRefImpl<A> extends ScopedRef<A> {
+  // Keep every generation at the ref's creation slot in the owner's finalizer order.
+  readonly scope: Scope.Scope
+}
+
 const makeUnsafe = <A>(
-  scope: Scope.Closeable,
+  scope: Scope.Scope,
+  generation: Scope.Closeable,
   value: A
-): ScopedRef<A> => {
+): ScopedRefImpl<A> => {
   const self = Object.create(Proto)
-  self.backing = Synchronized.makeUnsafe([scope, value] as const)
+  self.scope = scope
+  self.backing = Synchronized.makeUnsafe([generation, value] as const)
   return self
 }
 
+const isClosed = (scope: Scope.Scope): boolean => scope.state._tag === "Closed"
+
 /**
- * Creates a new `ScopedRef` from an effect that resourcefully produces a
- * value.
+ * Creates a new `ScopedRef` from an effect that acquires the initial value.
  *
  * **When to use**
  *
@@ -90,14 +86,14 @@ export const fromAcquire: <A, E, R>(
 ) => Effect.Effect<ScopedRef<A>, E, Scope.Scope | R> = Effect.fnUntraced(function*<A, E, R>(
   acquire: Effect.Effect<A, E, R>
 ) {
-  const scope = Scope.makeUnsafe()
+  const scope = Scope.forkUnsafe(yield* Effect.scope)
+  const generation = Scope.forkUnsafe(scope)
   const value = yield* acquire.pipe(
-    Scope.provide(scope),
+    Scope.provide(generation),
     Effect.tapCause((cause) => Scope.close(scope, Exit.failCause(cause)))
   )
-  const self = makeUnsafe(scope, value)
-  yield* Effect.addFinalizer((exit) => Scope.close(self.backing.backing.ref.current[0], exit))
-  return self
+  if (isClosed(generation)) return yield* Effect.interrupt
+  return makeUnsafe(scope, generation, value)
 }, Effect.uninterruptible)
 
 /**
@@ -150,28 +146,22 @@ export const get = <A>(self: ScopedRef<A>): Effect.Effect<A> => Effect.sync(() =
  * `fromAcquire` so acquisition and finalization are tracked.
  *
  * @see {@link fromAcquire} for creating a `ScopedRef` from an effect that acquires the initial value
- * @see {@link set} for replacing the current value with a resourcefully acquired value
+ * @see {@link set} for replacing the current value with a newly acquired value
  *
  * @category constructors
  * @since 2.0.0
  */
 export const make = <A>(evaluate: LazyArg<A>): Effect.Effect<ScopedRef<A>, never, Scope.Scope> =>
-  Effect.suspend(() => {
-    const scope = Scope.makeUnsafe()
-    const value = evaluate()
-    const self = makeUnsafe(scope, value)
-    return Effect.as(Effect.addFinalizer((exit) => Scope.close(self.backing.backing.ref.current[0], exit)), self)
-  })
+  fromAcquire(Effect.sync(evaluate))
 
 /**
- * Sets the value of this reference to the specified resourcefully-created
- * value, releasing any resources associated with the old value.
+ * Sets the value of this reference to a newly acquired scoped value, releasing
+ * any resources associated with the old value.
  *
  * **When to use**
  *
- * Use to replace the current value of an existing `ScopedRef` with a
- * resourcefully acquired value while releasing resources for the previous
- * value.
+ * Use to replace the current value of an existing `ScopedRef` with a newly
+ * acquired scoped value while releasing resources for the previous value.
  *
  * **Details**
  *
@@ -179,7 +169,7 @@ export const make = <A>(evaluate: LazyArg<A>): Effect.Effect<ScopedRef<A>, never
  * changed to the new value, with old resources released, or until the attempt
  * to acquire a new value fails.
  *
- * @category setters
+ * @category mutations
  * @since 2.0.0
  */
 export const set: {
@@ -192,13 +182,16 @@ export const set: {
       self: ScopedRef<A>,
       acquire: Effect.Effect<A, E, R>
     ) {
-      yield* Scope.close(self.backing.backing.ref.current[0], Exit.void)
-      const scope = Scope.makeUnsafe()
+      const generation = Scope.forkUnsafe((self as ScopedRefImpl<A>).scope)
       const value = yield* acquire.pipe(
-        Scope.provide(scope),
-        Effect.tapCause((cause) => Scope.close(scope, Exit.failCause(cause)))
+        Scope.provide(generation),
+        Effect.tapCause((cause) => Scope.close(generation, Exit.failCause(cause)))
       )
-      self.backing.backing.ref.current = [scope, value]
+      yield* Scope.close(self.backing.backing.ref.current[0], Exit.void).pipe(
+        Effect.tapCause((cause) => Scope.close(generation, Exit.failCause(cause)))
+      )
+      if (isClosed(generation)) return yield* Effect.interrupt
+      self.backing.backing.ref.current = [generation, value]
     },
     Effect.uninterruptible,
     (effect, self) => self.backing.semaphore.withPermit(effect)

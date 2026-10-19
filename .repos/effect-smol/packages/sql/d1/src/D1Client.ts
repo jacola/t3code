@@ -3,26 +3,15 @@
  *
  * This module adapts a Cloudflare D1 database binding into both the
  * D1-specific `D1Client` service and the generic Effect `SqlClient` service.
- * Use it in Workers, Pages Functions, and tests that provide a D1 binding to
- * run SQLite-compatible queries through Effect services and layers, including
- * repositories, migrations, request handlers, and local development against
- * Wrangler or Miniflare-backed D1 databases.
+ * It uses the SQLite statement compiler, caches prepared statements, maps D1
+ * failures to `SqlError`, and provides direct or config-backed layers.
+ * Transactions, streaming queries, and `updateValues` are not supported by this
+ * driver.
  *
- * The client prepares statements with D1, caches them by SQL string, and uses
- * the SQLite statement compiler for query and result name transforms. D1
- * commits individual statements automatically, and native `D1Database.batch`
- * is the D1 API for sequential, transactional multi-statement work; this
- * adapter does not expose Effect SQL transactions because it cannot map
- * `withTransaction` onto a connection-scoped D1 transaction. D1 databases are
- * serverless SQLite storage with platform limits and single-database serialized
- * execution, so keep queries small and indexed, batch large maintenance work
- * at the D1 API level, and use D1 sessions outside this client when an
- * application needs bookmark-based sequential consistency or read replicas.
- * Streaming queries and `updateValues` are not supported.
- *
+ * @stability unstable
  * @since 4.0.0
  */
-import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
+import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types"
 import * as Cache from "effect/Cache"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
@@ -30,15 +19,17 @@ import * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import { identity } from "effect/Function"
 import * as Layer from "effect/Layer"
+import * as Reactivity from "effect/reactivity/Reactivity"
 import type * as Scope from "effect/Scope"
+import * as Client from "effect/sql/SqlClient"
+import type { Connection } from "effect/sql/SqlConnection"
+import { SqlError, UnknownError } from "effect/sql/SqlError"
+import * as Statement from "effect/sql/Statement"
 import * as Stream from "effect/Stream"
-import * as Reactivity from "effect/unstable/reactivity/Reactivity"
-import * as Client from "effect/unstable/sql/SqlClient"
-import type { Connection } from "effect/unstable/sql/SqlConnection"
-import { SqlError, UnknownError } from "effect/unstable/sql/SqlError"
-import * as Statement from "effect/unstable/sql/Statement"
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name"
+const ATTR_DB_OPERATION_NAME = "db.operation.name"
+const ATTR_DB_QUERY_TEXT = "db.query.text"
 
 const classifyError = (cause: unknown, message: string, operation: string) =>
   new UnknownError({ cause, message, operation })
@@ -46,6 +37,7 @@ const classifyError = (cause: unknown, message: string, operation: string) =>
 /**
  * Unique runtime identifier used to tag `D1Client` values.
  *
+ * @stability unstable
  * @category type IDs
  * @since 4.0.0
  */
@@ -54,6 +46,7 @@ export const TypeId: TypeId = "~@effect/sql-d1/D1Client"
 /**
  * Type-level literal for the `D1Client` runtime identifier.
  *
+ * @stability unstable
  * @category type IDs
  * @since 4.0.0
  */
@@ -62,12 +55,38 @@ export type TypeId = "~@effect/sql-d1/D1Client"
 /**
  * Cloudflare D1 SQL client service, extending `SqlClient` with its D1 configuration and no `updateValues` support.
  *
- * @category models
+ * @stability unstable
+ * @category services
  * @since 4.0.0
  */
 export interface D1Client extends Client.SqlClient {
   readonly [TypeId]: TypeId
   readonly config: D1ClientConfig
+
+  /**
+   * Executes SQL statements as a single atomic D1 batch and returns their row results in order.
+   *
+   * **When to use**
+   *
+   * Use when you have a fixed collection of statements that should run in one
+   * request and roll back together if any statement fails.
+   *
+   * **Gotchas**
+   *
+   * Each statement uses the query and result name transformations from the
+   * client that created it. Mixing clients can produce differently shaped row
+   * results within the same batch.
+   *
+   * @since 4.0.0
+   */
+  readonly batch: <const Statements extends ReadonlyArray<Statement.Statement<any>>>(
+    statements: Statements
+  ) => Effect.Effect<
+    {
+      readonly [K in keyof Statements]: Effect.Success<Statements[K]>
+    },
+    SqlError
+  >
 
   /** Not supported in d1 */
   readonly updateValues: never
@@ -81,7 +100,8 @@ export interface D1Client extends Client.SqlClient {
  * Use to access or provide a Cloudflare D1 SQL client through the Effect
  * context.
  *
- * @category tags
+ * @stability unstable
+ * @category services
  * @since 4.0.0
  */
 export const D1Client = Context.Service<D1Client>("@effect/sql-d1/D1Client")
@@ -89,6 +109,7 @@ export const D1Client = Context.Service<D1Client>("@effect/sql-d1/D1Client")
 /**
  * Configuration for a Cloudflare D1 client, including the `D1Database`, prepared statement cache settings, span attributes, and query/result name transforms.
  *
+ * @stability unstable
  * @category models
  * @since 4.0.0
  */
@@ -102,9 +123,82 @@ export interface D1ClientConfig {
   readonly transformQueryNames?: ((str: string) => string) | undefined
 }
 
+type TransformRows = <A extends object>(rows: ReadonlyArray<A>) => ReadonlyArray<A>
+
+type BatchResults<Statements extends ReadonlyArray<Statement.Statement<any>>> = {
+  readonly [K in keyof Statements]: Effect.Success<Statements[K]>
+}
+
+interface StatementWithTransformRows extends Statement.Statement<any> {
+  readonly transformRows: TransformRows | undefined
+}
+
+const makeBatch = (options: {
+  readonly db: D1Database
+  readonly prepareCache: Cache.Cache<string, D1PreparedStatement, SqlError>
+  readonly spanAttributes: ReadonlyArray<readonly [string, unknown]>
+  readonly getClient: () => D1Client
+}): D1Client["batch"] =>
+<const Statements extends ReadonlyArray<Statement.Statement<any>>>(
+  statements: Statements
+) => {
+  if (statements.length === 0) {
+    return Effect.succeed([] as unknown as BatchResults<Statements>)
+  }
+  return Effect.useSpan(
+    "sql.execute",
+    { kind: "client" },
+    (span) =>
+      Effect.withFiber(Effect.fnUntraced(function*(fiber) {
+        const transformer = fiber.getRef(Statement.CurrentTransformer)
+        const prepared: Array<D1PreparedStatement> = []
+        const transforms: Array<TransformRows | undefined> = []
+        const queryTexts: Array<string> = []
+
+        for (const original of statements) {
+          const statement = transformer === undefined
+            ? original
+            : yield* transformer(original, options.getClient(), fiber, span)
+          const [sql, params] = statement.compile()
+          queryTexts.push(sql)
+          transforms.push((statement as StatementWithTransformRows).transformRows)
+          prepared.push((yield* Cache.get(options.prepareCache, sql)).bind(...params))
+        }
+
+        for (const [key, value] of options.spanAttributes) {
+          span.attribute(key, value)
+        }
+        span.attribute(ATTR_DB_OPERATION_NAME, "batch")
+        span.attribute(ATTR_DB_QUERY_TEXT, queryTexts.join("; "))
+
+        // D1 batches execute on the binding directly and intentionally cannot participate in SqlClient transactions.
+        const responses = yield* Effect.tryPromise({
+          try: () =>
+            options.db.batch<Record<string, unknown>>(prepared).then((responses) => {
+              for (const response of responses) {
+                if (response.error) {
+                  throw response.error
+                }
+              }
+              return responses
+            }),
+          catch: (cause) => new SqlError({ reason: classifyError(cause, "Failed to execute batch", "execute") })
+        })
+
+        const results = responses.map((response, index) => {
+          const rows = response.results || []
+          const transformRows = transforms[index]
+          return transformRows ? transformRows(rows) : rows
+        })
+        return results as BatchResults<Statements>
+      }))
+  )
+}
+
 /**
  * Creates a scoped Cloudflare D1 SQL client. Prepared statements are cached, while transactions and streaming queries are not supported by this driver.
  *
+ * @stability unstable
  * @category constructors
  * @since 4.0.0
  */
@@ -116,6 +210,10 @@ export const make = (
     const transformRows = options.transformResultNames ?
       Statement.defaultTransforms(options.transformResultNames).array :
       undefined
+    const spanAttributes: Array<readonly [string, unknown]> = [
+      ...(options.spanAttributes ? Object.entries(options.spanAttributes) : []),
+      [ATTR_DB_SYSTEM_NAME, "sqlite"]
+    ]
 
     const makeConnection = Effect.gen(function*() {
       const db = options.db
@@ -130,25 +228,31 @@ export const make = (
           })
       })
 
-      const runStatement = (
+      const runStatementRaw = (
         statement: D1PreparedStatement,
         params: ReadonlyArray<unknown> = []
-      ): Effect.Effect<ReadonlyArray<any>, SqlError, never> =>
+      ): Effect.Effect<D1Result, SqlError, never> =>
         Effect.tryPromise({
           try: async () => {
             const response = await statement.bind(...params).all()
             if (response.error) {
               throw response.error
             }
-            return response.results || []
+            return response
           },
           catch: (cause) => new SqlError({ reason: classifyError(cause, "Failed to execute statement", "execute") })
         })
 
+      const runStatement = (
+        statement: D1PreparedStatement,
+        params: ReadonlyArray<unknown> = []
+      ): Effect.Effect<ReadonlyArray<any>, SqlError, never> =>
+        Effect.map(runStatementRaw(statement, params), (response) => response.results || [])
+
       const runRaw = (
         sql: string,
         params: ReadonlyArray<unknown> = []
-      ) => runStatement(db.prepare(sql), params)
+      ) => runStatementRaw(db.prepare(sql), params)
 
       const runCached = (
         sql: string,
@@ -158,7 +262,7 @@ export const make = (
       const runUncached = (
         sql: string,
         params: ReadonlyArray<unknown> = []
-      ) => runRaw(sql, params)
+      ) => runStatement(db.prepare(sql), params)
 
       const runValues = (
         sql: string,
@@ -179,7 +283,22 @@ export const make = (
             })
         )
 
-      return identity<Connection>({
+      const runValuesUncached = (
+        sql: string,
+        params: ReadonlyArray<unknown>
+      ) =>
+        Effect.tryPromise({
+          try: () => {
+            return db.prepare(sql).bind(...params).raw() as Promise<
+              ReadonlyArray<
+                ReadonlyArray<unknown>
+              >
+            >
+          },
+          catch: (cause) => new SqlError({ reason: classifyError(cause, "Failed to execute statement", "execute") })
+        })
+
+      const connection = identity<Connection>({
         execute(sql, params, transformRows) {
           return transformRows
             ? Effect.map(runCached(sql, params), transformRows)
@@ -191,6 +310,9 @@ export const make = (
         executeValues(sql, params) {
           return runValues(sql, params)
         },
+        executeValuesUnprepared(sql, params) {
+          return runValuesUncached(sql, params)
+        },
         executeUnprepared(sql, params, transformRows) {
           return transformRows
             ? Effect.map(runUncached(sql, params), transformRows)
@@ -200,33 +322,66 @@ export const make = (
           return Stream.die("executeStream not implemented")
         }
       })
+      return { connection, prepareCache } as const
     })
 
-    const connection = yield* makeConnection
+    const { connection, prepareCache } = yield* makeConnection
     const acquirer = Effect.succeed(connection)
     const transactionAcquirer = Effect.die("transactions are not supported in D1")
 
-    return Object.assign(
+    let client!: D1Client
+    client = Object.assign(
       (yield* Client.make({
         acquirer,
         compiler,
         transactionAcquirer,
-        spanAttributes: [
-          ...(options.spanAttributes ? Object.entries(options.spanAttributes) : []),
-          [ATTR_DB_SYSTEM_NAME, "sqlite"]
-        ],
+        spanAttributes,
         transformRows
       })) as D1Client,
       {
         [TypeId]: TypeId as TypeId,
-        config: options
+        config: options,
+        batch: makeBatch({
+          db: options.db,
+          prepareCache,
+          spanAttributes,
+          getClient: () => client
+        })
       }
     )
+
+    if (options.transformQueryNames !== undefined || transformRows !== undefined) {
+      const clientWithoutTransformsBase = yield* Client.make({
+        acquirer: Effect.succeed(connection),
+        compiler: compiler.withoutTransform,
+        transactionAcquirer,
+        spanAttributes,
+        transformRows: undefined
+      })
+      let clientWithoutTransforms!: D1Client
+      clientWithoutTransforms = Object.assign(clientWithoutTransformsBase as D1Client, {
+        [TypeId]: TypeId as TypeId,
+        config: options,
+        batch: makeBatch({
+          db: options.db,
+          prepareCache,
+          spanAttributes,
+          getClient: () => clientWithoutTransforms
+        }),
+        withoutTransforms: () => clientWithoutTransforms
+      })
+      Object.assign(client, {
+        withoutTransforms: () => clientWithoutTransforms
+      })
+    }
+
+    return client
   })
 
 /**
  * Creates a layer from a `Config`-wrapped D1 client configuration, providing both `D1Client` and `SqlClient`.
  *
+ * @stability unstable
  * @category layers
  * @since 4.0.0
  */
@@ -247,6 +402,7 @@ export const layerConfig = (
 /**
  * Creates a layer from a concrete D1 client configuration, providing both `D1Client` and `SqlClient`.
  *
+ * @stability unstable
  * @category layers
  * @since 4.0.0
  */

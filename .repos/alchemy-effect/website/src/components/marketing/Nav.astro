@@ -1,9 +1,23 @@
 ---
 import Search from "@astrojs/starlight/components/Search.astro";
 import Logo from "./Logo.astro";
+
+interface Props {
+  /**
+   * Set on the marketing layout, where this nav is the only header and there
+   * is no Starlight sidebar — so every control stays in the top bar on all
+   * viewports. Docs pages render this as Starlight's `Header` override and
+   * leave it unset; there the GitHub/Discord links are dropped on mobile (they
+   * live in the hamburger menu footer) while the theme toggle stays in the top
+   * bar (see the `.alc-nav--docs` mobile rule below).
+   */
+  marketing?: boolean;
+}
+
+const { marketing = false } = Astro.props;
 ---
 
-<nav class="alc-nav">
+<nav class:list={["alc-nav", { "alc-nav--docs": !marketing }]}>
   <a href="/" class="alc-nav__brand">
     <Logo />
   </a>
@@ -12,10 +26,11 @@ import Logo from "./Logo.astro";
   <div class="alc-nav__search">
     <Search />
   </div>
-  <a href="/getting-started" class="alc-nav__link">Docs</a>
+  <a href="/getting-started" class="alc-nav__link alc-nav__link--docs">Docs</a>
   <a href="/blog" class="alc-nav__link">Blog</a>
+  <a href="/compare" class="alc-nav__link">Compare</a>
   <a
-    href="https://github.com/alchemy-run/alchemy-effect"
+    href="https://github.com/alchemy-run/alchemy"
     class="alc-nav__link alc-nav__link--icon"
     aria-label="GitHub"
   >
@@ -27,7 +42,7 @@ import Logo from "./Logo.astro";
     <span class="alc-nav__link-text">GitHub</span>
   </a>
   <a
-    href="https://discord.gg/jwKw8dBJdN"
+    href="/discord"
     class="alc-nav__link alc-nav__link--icon"
     aria-label="Discord"
   >
@@ -92,7 +107,12 @@ import Logo from "./Logo.astro";
     align-items: center;
     gap: 24px;
   }
+  /* Flex + fixed line-height so the logo centers the same way on marketing
+     pages (body line-height 1.6) and Starlight pages (1.75). */
   .alc-nav__brand {
+    display: flex;
+    align-items: center;
+    line-height: 1;
     text-decoration: none;
   }
   .alc-nav__spacer {
@@ -200,8 +220,23 @@ import Logo from "./Logo.astro";
     gap: 6px;
   }
 
+  /* Collapse search to an icon-only button (matching the theme toggle) —
+     docs pages have no other search entry point, so it must stay reachable. */
   @media (max-width: 880px) {
     .alc-nav__search {
+      width: auto;
+    }
+    .alc-nav__search :global(button[data-open-modal]) {
+      width: 32px;
+      justify-content: center;
+      padding: 0;
+    }
+    .alc-nav__search :global(button[data-open-modal] svg) {
+      width: 16px;
+      height: 16px;
+    }
+    .alc-nav__search :global(button[data-open-modal] > span),
+    .alc-nav__search :global(button[data-open-modal] kbd) {
       display: none;
     }
     .alc-nav__link--icon .alc-nav__link-text {
@@ -210,6 +245,37 @@ import Logo from "./Logo.astro";
   }
   @media (max-width: 640px) {
     .alc-nav { gap: 16px; }
+  }
+  @media (max-width: 480px) {
+    .alc-nav { gap: 12px; }
+  }
+  /* On phones, Docs, Blog, Compare and the icons don't all fit. Docs is
+     the one to drop: the hero CTA and the footer both lead there. */
+  @media (max-width: 460px) {
+    .alc-nav { gap: 10px; }
+    .alc-nav__link--docs { display: none; }
+  }
+  @media (max-width: 380px) {
+    .alc-nav { gap: 6px; }
+    /* The wordmark's size is an inline style (Logo's size prop). */
+    .alc-nav__brand :global(.alc-logo__word) { font-size: 19px !important; }
+  }
+  /*
+   * Docs pages render this nav inside Starlight's fixed `<header>`, which
+   * reserves room on the right for the floating hamburger button and shows a
+   * mobile menu (with theme select + social icons in its footer) below the
+   * `md` (50rem) breakpoint. Packing every control into the top bar too made it
+   * overflow past that reserved area and slide under the hamburger. Below 50rem
+   * we drop just the GitHub/Discord links — they live in the hamburger menu —
+   * but keep the theme toggle in the top bar so it stays one tap away. The
+   * docs gutter is also trimmed on mobile (see `--sl-nav-pad-x` in custom.css)
+   * to make room. Marketing pages have no hamburger/menu, so they keep every
+   * control (see `marketing`).
+   */
+  @media (max-width: 50rem) {
+    .alc-nav--docs .alc-nav__link--icon {
+      display: none;
+    }
   }
 </style>
 
@@ -264,6 +330,16 @@ import Logo from "./Logo.astro";
   @media (max-width: 50rem) {
     site-search button[data-close-modal] {
       display: inline-flex;
+      /* Starlight positions this button with `position: absolute` +
+         `align-self: flex-end`, relying on the static position of an
+         abs-pos flex child honoring alignment. WebKit doesn't implement
+         that, so on iOS the button lands at the frame's START and
+         overlaps the search input's magnifier/text. Pin it explicitly:
+         1rem matches .dialog-frame's mobile padding, which is exactly
+         where flex-end places it in browsers that do honor alignment —
+         inside the 5rem gutter that --sl-search-cancel-space reserves
+         to the right of the input. */
+      inset-inline-end: 1rem;
     }
   }
 

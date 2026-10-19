@@ -1,11 +1,7 @@
 import {
-  ClientPresentation,
-  CloudSession,
-  EnvironmentOwnedDataCleanup,
+  ClientCapabilities,
   PlatformConnectionSource,
-  PrimaryEnvironmentAuth,
-  RelayDeviceIdentity,
-  SshEnvironmentGateway,
+  Persistence,
 } from "@t3tools/client-runtime/platform";
 import {
   ConnectionBlockedError,
@@ -14,25 +10,28 @@ import {
   Wakeups,
 } from "@t3tools/client-runtime/connection";
 import { managedRelayAccountChanges, managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
-import { AuthStandardClientScopes } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import Constants from "expo-constants";
 import * as Network from "expo-network";
 import { AppState } from "react-native";
 
 import { authClientMetadata } from "../lib/authClientMetadata";
-import { loadOrCreateAgentAwarenessDeviceId } from "../lib/storage";
+import * as Runtime from "../lib/runtime";
+import * as MobileStorage from "../persistence/mobile-storage";
 import { appAtomRegistry } from "../state/atom-registry";
-import { clearThreadOutboxEnvironment } from "../state/thread-outbox";
+import { clearThreadOutboxEnvironment } from "../state/thread-outbox-removal";
 import { clearComposerDraftsEnvironment } from "../state/use-composer-drafts";
-import { connectionStorageLayer } from "./storage";
+import { clearThreadComposerErrorsForEnvironment } from "../state/thread-composer-error";
+import { mobileApplicationActiveWakeup } from "./app-state-wakeups";
+import * as ConnectionStorage from "./storage";
 
 function networkStatus(state: Network.NetworkState): "unknown" | "offline" | "online" {
-  if (state.isConnected === false || state.isInternetReachable === false) {
+  if (state.isConnected === false) {
     return "offline";
   }
   if (state.isConnected === true) {
@@ -41,7 +40,7 @@ function networkStatus(state: Network.NetworkState): "unknown" | "offline" | "on
   return "unknown";
 }
 
-const connectivityLayer = Connectivity.layer({
+const layerConnectivity = Connectivity.layer({
   status: Effect.tryPromise({
     try: () => Network.getNetworkStateAsync(),
     catch: () => undefined,
@@ -53,129 +52,214 @@ const connectivityLayer = Connectivity.layer({
   ),
   changes: Stream.callback((queue) =>
     Effect.acquireRelease(
-      Effect.sync(() =>
-        Network.addNetworkStateListener((state) => {
+      Effect.sync(() => {
+        let active = true;
+        const networkSubscription = Network.addNetworkStateListener((state) => {
           Queue.offerUnsafe(queue, networkStatus(state));
-        }),
-      ),
-      (subscription) => Effect.sync(() => subscription.remove()),
+        });
+        const appStateSubscription = AppState.addEventListener("change", (state) => {
+          if (state !== "active") {
+            return;
+          }
+          void Network.getNetworkStateAsync()
+            .then((current) => {
+              if (active) {
+                Queue.offerUnsafe(queue, networkStatus(current));
+              }
+            })
+            .catch(() => undefined);
+        });
+        return {
+          close: () => {
+            active = false;
+            networkSubscription.remove();
+            appStateSubscription.remove();
+          },
+        };
+      }),
+      ({ close }) => Effect.sync(close),
     ).pipe(Effect.asVoid),
   ),
 });
 
-const wakeupsLayer = Wakeups.layer({
-  changes: Stream.merge(
-    Stream.callback<"application-active">((queue) =>
-      Effect.acquireRelease(
-        Effect.sync(() =>
-          AppState.addEventListener("change", (state) => {
-            if (state === "active") {
-              Queue.offerUnsafe(queue, "application-active");
-            }
+/**
+ * Wakes connections when the device moves between networks while staying
+ * online, such as Wi-Fi to cellular. Connectivity only reports online or
+ * offline, so leaving home on cellular would otherwise go unnoticed until the
+ * LAN socket times out.
+ */
+const networkPathChanges = Stream.callback<"network-changed">((queue) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      let active = true;
+      let previous: Network.NetworkStateType | undefined;
+      const record = (state: Network.NetworkState) => {
+        const type = state.isConnected === true ? state.type : undefined;
+        if (previous !== undefined && type !== undefined && type !== previous) {
+          Queue.offerUnsafe(queue, "network-changed");
+        }
+        previous = type ?? previous;
+      };
+      // The listener reports changes only, so seed the current type; without
+      // it the first Wi-Fi to cellular move would go unnoticed.
+      void Network.getNetworkStateAsync()
+        .then((state) => {
+          if (active && previous === undefined && state.isConnected === true) {
+            previous = state.type;
+          }
+        })
+        .catch(() => undefined);
+      const subscription = Network.addNetworkStateListener(record);
+      return {
+        remove: () => {
+          active = false;
+          subscription.remove();
+        },
+      };
+    }),
+    (subscription) => Effect.sync(() => subscription.remove()),
+  ).pipe(Effect.asVoid),
+);
+
+const layerWakeups = Wakeups.layer({
+  changes: Stream.mergeAll(
+    [
+      Stream.callback<"application-active-probe" | "application-active-reconnect">((queue) =>
+        Effect.acquireRelease(
+          Effect.sync(() => {
+            let backgroundedAtMs = AppState.currentState === "background" ? Date.now() : null;
+            return AppState.addEventListener("change", (state) => {
+              if (state === "background") {
+                backgroundedAtMs = Date.now();
+                return;
+              }
+              if (state === "active") {
+                Queue.offerUnsafe(
+                  queue,
+                  mobileApplicationActiveWakeup(backgroundedAtMs, Date.now()),
+                );
+                backgroundedAtMs = null;
+              }
+            });
           }),
-        ),
-        (subscription) => Effect.sync(() => subscription.remove()),
-      ).pipe(Effect.asVoid),
-    ),
-    managedRelayAccountChanges(appAtomRegistry).pipe(
-      Stream.map(() => "credentials-changed" as const),
-    ),
+          (subscription) => Effect.sync(() => subscription.remove()),
+        ).pipe(Effect.asVoid),
+      ),
+      managedRelayAccountChanges(appAtomRegistry).pipe(
+        Stream.map(() => "credentials-changed" as const),
+      ),
+      networkPathChanges,
+    ],
+    { concurrency: "unbounded" },
   ),
 });
 
-const capabilitiesLayer = Layer.succeedContext(
-  Context.make(
-    CloudSession,
-    CloudSession.of({
-      clerkToken: Effect.gen(function* () {
-        const session = appAtomRegistry.get(managedRelaySessionAtom);
-        if (session === null) {
-          return yield* new ConnectionBlockedError({
-            reason: "authentication",
-            detail: "Sign in to T3 Cloud to connect this environment.",
-          });
-        }
-        const token = yield* session.readClerkToken().pipe(
-          Effect.mapError(
-            (error) =>
-              new ConnectionTransientError({
-                reason: "network",
-                detail: error.message,
+const layerCapabilities = Layer.effectContext(
+  Effect.gen(function* () {
+    const storage = yield* MobileStorage.MobileStorage;
+    return Context.make(
+      ClientCapabilities.CloudSession,
+      ClientCapabilities.CloudSession.of({
+        identity: Effect.sync(() =>
+          Option.fromNullishOr(appAtomRegistry.get(managedRelaySessionAtom)),
+        ),
+        clerkToken: Effect.gen(function* () {
+          const session = appAtomRegistry.get(managedRelaySessionAtom);
+          if (session === null) {
+            return yield* new ConnectionBlockedError({
+              reason: "authentication",
+              detail: "Sign in to T3 Connect to connect this environment.",
+            });
+          }
+          const token = yield* session.readClerkToken().pipe(
+            Effect.mapError(
+              (error) =>
+                new ConnectionTransientError({
+                  reason: "network",
+                  detail: error.message,
+                }),
+            ),
+          );
+          if (token === null) {
+            return yield* new ConnectionBlockedError({
+              reason: "authentication",
+              detail: "The T3 Connect session is unavailable.",
+            });
+          }
+          return token;
+        }),
+      }),
+    ).pipe(
+      Context.add(
+        ClientCapabilities.PrimaryEnvironmentAuth,
+        ClientCapabilities.PrimaryEnvironmentAuth.of({
+          bearerToken: Effect.succeed(Option.none()),
+        }),
+      ),
+      Context.add(
+        ClientCapabilities.RelayDeviceIdentity,
+        ClientCapabilities.RelayDeviceIdentity.of({
+          deviceId: storage.loadOrCreateAgentAwarenessDeviceId.pipe(
+            Effect.mapError(
+              (cause) =>
+                new ConnectionTransientError({
+                  reason: "remote-unavailable",
+                  detail: `Could not load the mobile device identity: ${String(cause)}`,
+                }),
+            ),
+            Effect.map(Option.some),
+          ),
+        }),
+      ),
+      Context.add(
+        ClientCapabilities.ClientPresentation,
+        ClientCapabilities.ClientPresentation.of({
+          metadata: authClientMetadata(Constants.expoConfig?.version),
+        }),
+      ),
+      Context.add(
+        ClientCapabilities.SshEnvironmentGateway,
+        ClientCapabilities.SshEnvironmentGateway.of({
+          provision: () =>
+            Effect.fail(
+              new ConnectionBlockedError({
+                reason: "unsupported",
+                detail: "SSH environments are only available in the desktop app.",
               }),
-          ),
-        );
-        if (token === null) {
-          return yield* new ConnectionBlockedError({
-            reason: "authentication",
-            detail: "The T3 Cloud session is unavailable.",
-          });
-        }
-        return token;
-      }),
-    }),
-  ).pipe(
-    Context.add(
-      PrimaryEnvironmentAuth,
-      PrimaryEnvironmentAuth.of({ bearerToken: Effect.succeed(Option.none()) }),
-    ),
-    Context.add(
-      RelayDeviceIdentity,
-      RelayDeviceIdentity.of({
-        deviceId: Effect.tryPromise({
-          try: () => loadOrCreateAgentAwarenessDeviceId(),
-          catch: (cause) =>
-            new ConnectionTransientError({
-              reason: "remote-unavailable",
-              detail: `Could not load the mobile device identity: ${String(cause)}`,
-            }),
-        }).pipe(Effect.map(Option.some)),
-      }),
-    ),
-    Context.add(
-      ClientPresentation,
-      ClientPresentation.of({
-        metadata: authClientMetadata(),
-        scopes: AuthStandardClientScopes,
-      }),
-    ),
-    Context.add(
-      SshEnvironmentGateway,
-      SshEnvironmentGateway.of({
-        provision: () =>
-          Effect.fail(
-            new ConnectionBlockedError({
-              reason: "unsupported",
-              detail: "SSH environments are only available in the desktop app.",
-            }),
-          ),
-        prepare: () =>
-          Effect.fail(
-            new ConnectionBlockedError({
-              reason: "unsupported",
-              detail: "SSH environments are only available in the desktop app.",
-            }),
-          ),
-        disconnect: () => Effect.void,
-      }),
-    ),
-  ),
+            ),
+          prepare: () =>
+            Effect.fail(
+              new ConnectionBlockedError({
+                reason: "unsupported",
+                detail: "SSH environments are only available in the desktop app.",
+              }),
+            ),
+          disconnect: () => Effect.void,
+        }),
+      ),
+    );
+  }),
 );
 
-const platformConnectionSourceLayer = Layer.succeed(
-  PlatformConnectionSource,
-  PlatformConnectionSource.of({
+const layerPlatformConnectionSource = Layer.succeed(
+  PlatformConnectionSource.PlatformConnectionSource,
+  PlatformConnectionSource.PlatformConnectionSource.of({
     registrations: Stream.empty,
   }),
 );
 
-const environmentOwnedDataCleanupLayer = Layer.succeed(
-  EnvironmentOwnedDataCleanup,
-  EnvironmentOwnedDataCleanup.of({
+const layerProvidedConnectionStorage = ConnectionStorage.layer.pipe(Layer.provide(Runtime.layer));
+const layerProvidedCapabilities = layerCapabilities.pipe(Layer.provide(Runtime.layer));
+
+const layerEnvironmentOwnedDataCleanup = Layer.succeed(
+  Persistence.EnvironmentOwnedDataCleanup,
+  Persistence.EnvironmentOwnedDataCleanup.of({
     clear: (environmentId) =>
       Effect.all(
         [
           Effect.promise(() => clearThreadOutboxEnvironment(environmentId)),
           Effect.promise(() => clearComposerDraftsEnvironment(environmentId)),
+          Effect.sync(() => clearThreadComposerErrorsForEnvironment(environmentId)),
         ],
         { concurrency: "unbounded", discard: true },
       ).pipe(
@@ -190,22 +274,24 @@ const environmentOwnedDataCleanupLayer = Layer.succeed(
 );
 
 type ConnectionPlatformLayerSource =
-  | typeof connectionStorageLayer
-  | typeof connectivityLayer
-  | typeof wakeupsLayer
-  | typeof capabilitiesLayer
-  | typeof platformConnectionSourceLayer
-  | typeof environmentOwnedDataCleanupLayer;
+  | typeof layerProvidedConnectionStorage
+  | typeof Runtime.layer
+  | typeof layerConnectivity
+  | typeof layerWakeups
+  | typeof layerProvidedCapabilities
+  | typeof layerPlatformConnectionSource
+  | typeof layerEnvironmentOwnedDataCleanup;
 
-export const connectionPlatformLayer: Layer.Layer<
+export const layer: Layer.Layer<
   Layer.Success<ConnectionPlatformLayerSource>,
   Layer.Error<ConnectionPlatformLayerSource>,
   Layer.Services<ConnectionPlatformLayerSource>
 > = Layer.mergeAll(
-  connectionStorageLayer,
-  connectivityLayer,
-  wakeupsLayer,
-  capabilitiesLayer,
-  platformConnectionSourceLayer,
-  environmentOwnedDataCleanupLayer,
+  layerProvidedConnectionStorage,
+  Runtime.layer,
+  layerConnectivity,
+  layerWakeups,
+  layerProvidedCapabilities,
+  layerPlatformConnectionSource,
+  layerEnvironmentOwnedDataCleanup,
 );

@@ -1,50 +1,172 @@
-import { SymbolView } from "expo-symbols";
-import { useState } from "react";
-import { Image, View } from "react-native";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { useThemeColor } from "../lib/useThemeColor";
-import { useAssetUrl } from "../state/assets";
+import { SymbolView } from "./ui/AppSymbol";
+import { AppText } from "./ui/AppText";
+import { Image } from "expo-image";
+import { memo, useLayoutEffect, useMemo, useState } from "react";
+import { View } from "react-native";
+import type { EnvironmentId, ProjectIconOverride } from "@t3tools/contracts";
+import {
+  getProjectFaviconCacheKey,
+  getProjectFaviconResourceKey,
+  isProjectFaviconFallbackUrl,
+} from "@t3tools/shared/projectFavicon";
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import { projectFaviconUrlAtom } from "../state/assets";
+import {
+  countGlyphs,
+  projectIconColorClassNames,
+  resolveProjectIconGlyph,
+  type ProjectIconGlyph,
+} from "../lib/projectIcon";
 
-/* ─── Favicon cache (matches web pattern) ────────────────────────────── */
-const loadedFaviconUrls = new Set<string>();
+import {
+  beginProjectFaviconRequest,
+  createProjectFaviconRequest,
+  hasLoadedProjectFavicon,
+  markProjectFaviconFailed,
+  markProjectFaviconLoaded,
+} from "../lib/projectFaviconRequests";
 
-/* ─── Component ──────────────────────────────────────────────────────── */
-export function ProjectFavicon(props: {
+const EMPTY_FAVICON_URL = Atom.make<string | null>(null);
+
+export const ProjectFavicon = memo(function ProjectFavicon(props: {
   readonly environmentId: EnvironmentId;
+  readonly open?: boolean;
   readonly size?: number;
   readonly projectTitle: string;
   readonly workspaceRoot?: string | null;
+  readonly faviconPath?: string | null;
+  readonly projectIcon?: ProjectIconOverride | null;
 }) {
   const size = props.size ?? 42;
-  const faviconUrl = useAssetUrl(
-    props.environmentId,
-    props.workspaceRoot === null || props.workspaceRoot === undefined
-      ? null
-      : { _tag: "project-favicon", cwd: props.workspaceRoot },
+  const glyph = resolveProjectIconGlyph(props.projectIcon, props.projectTitle);
+  const faviconUrl = useAtomValue(
+    props.workspaceRoot == null || glyph !== null
+      ? EMPTY_FAVICON_URL
+      : projectFaviconUrlAtom({
+          environmentId: props.environmentId,
+          cwd: props.workspaceRoot,
+          faviconPath: props.faviconPath,
+        }),
   );
+  const renderableFaviconUrl = useMemo(
+    () => (isProjectFaviconFallbackUrl(faviconUrl) ? null : faviconUrl),
+    [faviconUrl],
+  );
+  // Inline images are self-contained; remote URLs key on their revision so signed-token
+  // rotation reuses the disk cache while a changed icon starts from the loading state.
+  const cacheKey = useMemo(
+    () =>
+      renderableFaviconUrl && props.workspaceRoot
+        ? renderableFaviconUrl.startsWith("data:")
+          ? getProjectFaviconResourceKey(
+              props.environmentId,
+              props.workspaceRoot,
+              props.faviconPath,
+            )
+          : getProjectFaviconCacheKey(
+              props.environmentId,
+              props.workspaceRoot,
+              renderableFaviconUrl,
+            )
+        : null,
+    [renderableFaviconUrl, props.environmentId, props.workspaceRoot, props.faviconPath],
+  );
+
+  if (glyph !== null) {
+    return <ProjectIconGlyphView glyph={glyph} size={size} />;
+  }
 
   return (
     <ProjectFaviconImage
-      key={faviconUrl}
-      faviconUrl={faviconUrl}
+      key={cacheKey}
+      cacheKey={cacheKey}
+      faviconUrl={renderableFaviconUrl}
+      open={props.open}
       projectTitle={props.projectTitle}
       size={size}
     />
   );
+});
+
+function ProjectIconGlyphView(props: { readonly glyph: ProjectIconGlyph; readonly size: number }) {
+  const { glyph, size } = props;
+  if (glyph.kind === "emoji") {
+    return (
+      <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+        <AppText
+          allowFontScaling={false}
+          style={{
+            fontSize: size * 0.8,
+            lineHeight: size,
+            textAlign: "center",
+            includeFontPadding: false,
+          }}
+        >
+          {glyph.emoji}
+        </AppText>
+      </View>
+    );
+  }
+
+  const colors = projectIconColorClassNames(glyph.color);
+  return (
+    <View
+      className={colors.background}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size * 0.25,
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <AppText
+        allowFontScaling={false}
+        numberOfLines={1}
+        className={`font-mono ${colors.text}`}
+        style={{
+          fontWeight: "700",
+          fontSize: size * (countGlyphs(glyph.text) === 1 ? 0.6 : 0.515625),
+          lineHeight: size,
+          textAlign: "center",
+          includeFontPadding: false,
+        }}
+      >
+        {glyph.text}
+      </AppText>
+    </View>
+  );
 }
 
 function ProjectFaviconImage(props: {
+  readonly cacheKey: string | null;
   readonly faviconUrl: string | null;
+  readonly open?: boolean;
   readonly projectTitle: string;
   readonly size: number;
 }) {
-  const iconMuted = useThemeColor("--color-icon-subtle");
+  const faviconRequest = useMemo(
+    () => createProjectFaviconRequest(props.cacheKey, props.faviconUrl),
+    [props.cacheKey, props.faviconUrl],
+  );
+  const [activeFaviconRequest, setActiveFaviconRequest] = useState<typeof faviconRequest>(null);
+  useLayoutEffect(() => {
+    if (faviconRequest === null) return;
+
+    const endRequest = beginProjectFaviconRequest(faviconRequest);
+    setActiveFaviconRequest(faviconRequest);
+    return endRequest;
+  }, [faviconRequest]);
 
   const [status, setStatus] = useState<"loading" | "loaded" | "error">(() =>
-    props.faviconUrl && loadedFaviconUrls.has(props.faviconUrl) ? "loaded" : "loading",
+    props.faviconUrl?.startsWith("data:") || hasLoadedProjectFavicon(props.cacheKey)
+      ? "loaded"
+      : "loading",
   );
 
-  const showImage = props.faviconUrl !== null && status === "loaded";
+  const requestIsActive = faviconRequest !== null && activeFaviconRequest === faviconRequest;
+  const showImage = requestIsActive && status === "loaded";
 
   return (
     <View
@@ -55,22 +177,25 @@ function ProjectFaviconImage(props: {
         justifyContent: "center",
       }}
     >
-      {/* Folder icon fallback (matches web's FolderIcon) */}
       {!showImage ? (
         <SymbolView
-          name="folder.fill"
-          size={props.size * 0.78}
-          tintColor={iconMuted}
+          name={{ ios: "folder.fill", android: props.open ? "folder_open" : "folder" }}
+          size={props.size}
+          tintColorClassName={"accent-icon-subtle"}
           type="monochrome"
         />
       ) : null}
 
-      {/* Favicon image (hidden until loaded) */}
-      {props.faviconUrl ? (
+      {requestIsActive ? (
         <Image
-          source={{
-            uri: props.faviconUrl,
-          }}
+          key={faviconRequest.faviconUrl}
+          source={
+            faviconRequest.faviconUrl.startsWith("data:")
+              ? { uri: faviconRequest.faviconUrl }
+              : { uri: faviconRequest.faviconUrl, cacheKey: faviconRequest.cacheKey }
+          }
+          cachePolicy={faviconRequest.faviconUrl.startsWith("data:") ? "memory" : "memory-disk"}
+          recyclingKey={faviconRequest.cacheKey}
           accessibilityLabel={`${props.projectTitle} favicon`}
           style={{
             width: props.size,
@@ -78,12 +203,15 @@ function ProjectFaviconImage(props: {
             borderRadius: props.size * 0.16,
             ...(showImage ? {} : { position: "absolute" as const, opacity: 0 }),
           }}
-          resizeMode="contain"
+          contentFit="contain"
           onLoad={() => {
-            if (props.faviconUrl) loadedFaviconUrls.add(props.faviconUrl);
+            if (!markProjectFaviconLoaded(faviconRequest)) return;
             setStatus("loaded");
           }}
-          onError={() => setStatus("error")}
+          onError={() => {
+            if (!markProjectFaviconFailed(faviconRequest)) return;
+            setStatus("error");
+          }}
         />
       ) : null}
     </View>

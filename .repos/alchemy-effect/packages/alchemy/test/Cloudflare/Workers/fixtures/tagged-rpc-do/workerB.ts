@@ -1,7 +1,7 @@
-import * as Cloudflare from "alchemy/Cloudflare";
+import * as Cloudflare from "@/Cloudflare";
 import * as Effect from "effect/Effect";
-import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import { HttpServerRequest } from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 
 import { Counter } from "./object.ts";
 import { WorkerA } from "./workerA.ts";
@@ -13,7 +13,7 @@ import { WorkerA } from "./workerA.ts";
 export default class WorkerB extends Cloudflare.Worker<WorkerB>()(
   "WorkerB",
   {
-    main: import.meta.filename,
+    main: import.meta.url,
   },
   Effect.gen(function* () {
     const counter = yield* Counter.from(WorkerA);

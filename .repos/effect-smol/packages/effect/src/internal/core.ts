@@ -13,6 +13,7 @@ import type { StackFrame } from "../References.ts"
 import type * as Types from "../Types.ts"
 import { SingleShotGen } from "../Utils.ts"
 import type { FiberImpl } from "./effect.ts"
+import * as InternalRecord from "./record.ts"
 
 /** @internal */
 export const EffectTypeId = `~effect/Effect` as const
@@ -87,7 +88,7 @@ export const StructuralProto = {
     const thatKeys = Object.keys(that)
     if (selfKeys.length !== thatKeys.length) return false
     for (let i = 0; i < selfKeys.length; i++) {
-      if (selfKeys[i] !== thatKeys[i] && !Equal.equals(this[selfKeys[i]], that[selfKeys[i]])) {
+      if (selfKeys[i] !== thatKeys[i] || !Equal.equals(this[selfKeys[i]], that[selfKeys[i]])) {
         return false
       }
     }
@@ -112,7 +113,7 @@ export const EffectProto = {
 }
 
 /** @internal */
-export const isEffect = (u: unknown): u is Effect.Effect<any, any, any> => hasProperty(u, EffectTypeId)
+export const isEffect = (u: unknown): u is Effect.Effect<unknown, unknown, unknown> => hasProperty(u, EffectTypeId)
 
 /** @internal */
 export const isExit = (u: unknown): u is Exit.Exit<unknown, unknown> => hasProperty(u, ExitTypeId)
@@ -135,8 +136,8 @@ export const isCauseReason = (self: unknown): self is Cause.Reason<unknown> => h
 
 /** @internal */
 export class CauseImpl<E> implements Cause.Cause<E> {
-  readonly [CauseTypeId]: typeof CauseTypeId
-  readonly reasons: ReadonlyArray<
+  declare readonly [CauseTypeId]: typeof CauseTypeId
+  declare readonly reasons: ReadonlyArray<
     Cause.Fail<E> | Cause.Die | Cause.Interrupt
   >
   constructor(
@@ -238,11 +239,11 @@ export abstract class ReasonBase<Tag extends string> implements Cause.Cause.Reas
 }
 
 /** @internal */
-export const constEmptyAnnotations = new Map<string, unknown>()
+export const constEmptyAnnotations: ReadonlyMap<string, unknown> = new Map<string, unknown>()
 
 /** @internal */
 export class Fail<E> extends ReasonBase<"Fail"> implements Cause.Fail<E> {
-  readonly error: E
+  declare readonly error: E
   constructor(
     error: E,
     annotations = constEmptyAnnotations
@@ -278,6 +279,48 @@ export const causeFromReasons = <E>(
   reasons: ReadonlyArray<Cause.Reason<E>>
 ): Cause.Cause<E> => new CauseImpl(reasons)
 
+const dedupeReasons = <E>(
+  self: ReadonlyArray<Cause.Reason<E>>,
+  that: ReadonlyArray<Cause.Reason<E>>
+): Array<Cause.Reason<E>> => {
+  // Avoid importing Array.ts into the core bundle.
+  // Snapshot both arrays before invoking user-defined hash or equality methods.
+  const buckets = new Map<number, Array<Cause.Reason<E>>>()
+  const out: Array<Cause.Reason<E>> = []
+  for (const reason of self.concat(that)) {
+    const hash = Hash.hash(reason)
+    const bucket = buckets.get(hash)
+    if (bucket === undefined) {
+      buckets.set(hash, [reason])
+    } else if (bucket.some((previous) => Equal.equals(previous, reason))) {
+      continue
+    } else {
+      bucket.push(reason)
+    }
+    out.push(reason)
+  }
+  return out
+}
+
+/** @internal */
+export const causeCombine: {
+  <E2>(that: Cause.Cause<E2>): <E>(self: Cause.Cause<E>) => Cause.Cause<E | E2>
+  <E, E2>(self: Cause.Cause<E>, that: Cause.Cause<E2>): Cause.Cause<E | E2>
+} = dual(
+  2,
+  <E, E2>(self: Cause.Cause<E>, that: Cause.Cause<E2>): Cause.Cause<E | E2> => {
+    if (self.reasons.length === 0) {
+      return that as Cause.Cause<E | E2>
+    } else if (that.reasons.length === 0) {
+      return self as Cause.Cause<E | E2>
+    }
+    const newCause = new CauseImpl<E | E2>(
+      dedupeReasons<E | E2>(self.reasons, that.reasons)
+    )
+    return Equal.equals(self, newCause) ? self : newCause
+  }
+)
+
 /** @internal */
 export const causeEmpty: Cause.Cause<never> = new CauseImpl([])
 
@@ -286,7 +329,7 @@ export const causeFail = <E>(error: E): Cause.Cause<E> => new CauseImpl([new Fai
 
 /** @internal */
 export class Die extends ReasonBase<"Die"> implements Cause.Die {
-  readonly defect: unknown
+  declare readonly defect: unknown
   constructor(
     defect: unknown,
     annotations = constEmptyAnnotations
@@ -379,6 +422,11 @@ export interface Primitive {
   [evaluate](fiber: FiberImpl): Primitive | Yield
 }
 
+interface PrimitiveClass {
+  new(value: any): Primitive
+  prototype: any
+}
+
 function defaultEvaluate(_fiber: FiberImpl): Primitive | Yield {
   return exitDie(`Effect.evaluate: Not implemented`) as any
 }
@@ -392,12 +440,14 @@ export const makePrimitiveProto = <Op extends string>(options: {
   readonly [contA]?: (
     this: Primitive,
     value: any,
-    fiber: FiberImpl
+    fiber: FiberImpl,
+    exit?: Exit.Exit<any, any>
   ) => Primitive | Effect.Effect<any, any, any> | Yield
   readonly [contE]?: (
     this: Primitive,
     cause: Cause.Cause<any>,
-    fiber: FiberImpl
+    fiber: FiberImpl,
+    exit?: Exit.Exit<any, any>
   ) => Primitive | Effect.Effect<any, any, any> | Yield
   readonly [contAll]?: (
     this: Primitive,
@@ -415,20 +465,18 @@ export const makePrimitiveProto = <Op extends string>(options: {
 
 /** @internal */
 export const makePrimitive = <
-  Fn extends (...args: Array<any>) => any,
-  Single extends boolean = true
+  Fn extends (...args: Array<any>) => any
 >(options: {
   readonly op: string
-  readonly single?: Single
   readonly [evaluate]?: (
     this: Primitive & {
-      readonly [args]: Single extends true ? Parameters<Fn>[0] : Parameters<Fn>
+      readonly [args]: Parameters<Fn>[0]
     },
     fiber: FiberImpl
   ) => Primitive | Effect.Effect<any, any, any> | Yield
   readonly [contA]?: (
     this: Primitive & {
-      readonly [args]: Single extends true ? Parameters<Fn>[0] : Parameters<Fn>
+      readonly [args]: Parameters<Fn>[0]
     },
     value: any,
     fiber: FiberImpl,
@@ -436,7 +484,7 @@ export const makePrimitive = <
   ) => Primitive | Effect.Effect<any, any, any> | Yield
   readonly [contE]?: (
     this: Primitive & {
-      readonly [args]: Single extends true ? Parameters<Fn>[0] : Parameters<Fn>
+      readonly [args]: Parameters<Fn>[0]
     },
     cause: Cause.Cause<any>,
     fiber: FiberImpl,
@@ -444,16 +492,18 @@ export const makePrimitive = <
   ) => Primitive | Effect.Effect<any, any, any> | Yield
   readonly [contAll]?: (
     this: Primitive & {
-      readonly [args]: Single extends true ? Parameters<Fn>[0] : Parameters<Fn>
+      readonly [args]: Parameters<Fn>[0]
     },
     fiber: FiberImpl
   ) => void | ((value: any, fiber: FiberImpl) => void)
 }): Fn => {
   const Proto = makePrimitiveProto(options as any)
-  return function() {
-    const self = Object.create(Proto)
-    self[args] = options.single === false ? arguments : arguments[0]
-    return self
+  const PrimitiveImpl = function(this: any, value: any) {
+    this[args] = value
+  } as unknown as PrimitiveClass
+  PrimitiveImpl.prototype = Proto
+  return function(value: any) {
+    return new PrimitiveImpl(value)
   } as Fn
 }
 
@@ -470,12 +520,12 @@ export const makeExit = <
   ) => Primitive | Yield
 }): Fn => {
   const Proto = {
-    ...makePrimitiveProto(options),
     [ExitTypeId]: ExitTypeId,
     _tag: options.op,
     get [options.prop](): any {
       return (this as any)[args]
     },
+    ...makePrimitiveProto(options),
     toString(this: any) {
       return `${options.op}(${format(this[args])})`
     },
@@ -497,10 +547,12 @@ export const makeExit = <
       return Hash.combine(Hash.string(options.op), Hash.hash(this[args]))
     }
   }
+  const ExitPrimitive = function(this: any, value: unknown) {
+    this[args] = value
+  } as unknown as PrimitiveClass
+  ExitPrimitive.prototype = Proto
   return function(value: unknown) {
-    const self = Object.create(Proto)
-    self[args] = value
-    return self
+    return new ExitPrimitive(value)
   } as Fn
 }
 
@@ -531,17 +583,29 @@ export const exitFailCause: <E>(cause: Cause.Cause<E>) => Exit.Exit<never, E> = 
   [evaluate](fiber) {
     let cause = this[args]
     let annotated = false
-    if (fiber.currentStackFrame) {
-      cause = causeAnnotate(cause, { mapUnsafe: new Map([[StackTraceKey.key, fiber.currentStackFrame]]) } as any)
+    if (fiber.cache.stackFrame) {
+      cause = causeAnnotate(cause, { mapUnsafe: new Map([[StackTraceKey.key, fiber.cache.stackFrame]]) } as any)
       annotated = true
     }
     let cont = fiber.getCont(contE)
-    while (fiber.interruptible && fiber._interruptedCause && cont) {
-      cont = fiber.getCont(contE)
+    const interruptedCause = fiber._interruptedCause
+    if (interruptedCause && fiber.interruptible) {
+      // Drop typed failures only when interruption skips a recovery handler.
+      // Interruptibility-restoration continuations have no identifier.
+      let skippedHandler = false
+      while (cont && fiber.interruptible) {
+        skippedHandler ||= identifier in cont
+        cont = fiber.getCont(contE)
+      }
+      if (skippedHandler) {
+        cause = causeFromReasons(cause.reasons.filter((reason) => reason._tag !== "Fail"))
+      }
+      cause = causeCombine(cause, interruptedCause)
+      annotated = true
     }
     return cont
       ? cont[contE](cause, fiber, annotated ? undefined : this)
-      : fiber.yieldWith(annotated ? this : exitFailCause(cause))
+      : fiber.yieldWith(annotated ? exitFailCause(cause) : this)
   }
 })
 
@@ -558,6 +622,23 @@ export const withFiber: <A, E = never, R = never>(
   op: "WithFiber",
   [evaluate](fiber) {
     return this[args](fiber)
+  }
+})
+
+/**
+ * Accesses the current fiber to compute a value without a separate `succeed`
+ * operation.
+ *
+ * @internal
+ */
+export const withFiberSucceed: <A, R = never>(
+  evaluate: (fiber: FiberImpl<unknown, unknown>) => A
+) => Effect.Effect<A, never, R> = makePrimitive({
+  op: "WithFiberSucceed",
+  [evaluate](fiber) {
+    const value = this[args](fiber)
+    const cont = fiber.getCont(contA)
+    return cont ? cont[contA](value, fiber) : fiber.yieldWith(exitSucceed(value))
   }
 })
 
@@ -587,10 +668,10 @@ export const Error: new<A extends Record<string, any> = {}>(
 ) => Cause.YieldableError & Readonly<A> = (function() {
   const plainArgsSymbol = Symbol.for("effect/Data/Error/plainArgs")
   return class Base extends YieldableError {
-    constructor(args: any) {
+    constructor(args: Record<string, any> | undefined) {
       super(args?.message, args?.cause ? { cause: args.cause } : undefined)
       if (args) {
-        Object.assign(this, args)
+        InternalRecord.assignProperties(this, args)
         // @effect-diagnostics-next-line floatingEffect:off
         Object.defineProperty(this, plainArgsSymbol, {
           value: args,

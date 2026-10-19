@@ -2,7 +2,7 @@ import { relayClerkTokenOptions } from "@t3tools/shared/relayAuth";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 import * as Schema from "effect/Schema";
 
-export class CloudPublicConfigMissingError extends Schema.TaggedErrorClass<CloudPublicConfigMissingError>()(
+export class CloudPublicConfigMissingError extends Schema.TaggedError<CloudPublicConfigMissingError>()(
   "CloudPublicConfigMissingError",
   {
     key: Schema.Literal("T3CODE_CLERK_JWT_TEMPLATE"),
@@ -24,7 +24,7 @@ export interface CloudPublicConfig {
   };
 }
 
-function trimNonEmpty(value: string | undefined): string | null {
+export function trimNonEmpty(value: string | undefined): string | null {
   return value?.trim() || null;
 }
 

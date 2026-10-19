@@ -1,8 +1,52 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { parseCliArgs } from "./cliArgs.ts";
+import { parseCliArgs, tokenizeCliArgs } from "./cliArgs.ts";
+
+describe("tokenizeCliArgs", () => {
+  it("preserves escaped double quotes outside quoted values", () => {
+    expect(tokenizeCliArgs(String.raw`--config model=\"gpt-6.1-sol\" --strict-config`)).toEqual([
+      "--config",
+      'model="gpt-6.1-sol"',
+      "--strict-config",
+    ]);
+  });
+
+  it("preserves escaped single quotes outside quoted values", () => {
+    expect(tokenizeCliArgs(String.raw`--append-system-prompt don\'t --verbose`)).toEqual([
+      "--append-system-prompt",
+      "don't",
+      "--verbose",
+    ]);
+  });
+
+  it("preserves quoted values and escaped spaces", () => {
+    expect(
+      tokenizeCliArgs(
+        String.raw`--config model="gpt 5" --enable foo\ bar --config=profile='work profile'`,
+      ),
+    ).toEqual(["--config", "model=gpt 5", "--enable", "foo bar", "--config=profile=work profile"]);
+  });
+
+  it("preserves literal backslashes in path values", () => {
+    expect(
+      tokenizeCliArgs(String.raw`--config cacheDir=C:\Users\me --config "quoted=C:\Users\me"`),
+    ).toEqual([
+      "--config",
+      String.raw`cacheDir=C:\Users\me`,
+      "--config",
+      String.raw`quoted=C:\Users\me`,
+    ]);
+  });
+});
 
 describe("parseCliArgs", () => {
+  it("keeps escaped apostrophes in flag values without consuming the next flag", () => {
+    expect(parseCliArgs(String.raw`--append-system-prompt don\'t --verbose`)).toEqual({
+      flags: { "append-system-prompt": "don't", verbose: null },
+      positionals: [],
+    });
+  });
+
   it("returns empty result for empty string", () => {
     expect(parseCliArgs("")).toEqual({ flags: {}, positionals: [] });
   });
@@ -53,6 +97,13 @@ describe("parseCliArgs", () => {
   it("parses --append-system-prompt with value and --chrome", () => {
     expect(parseCliArgs("--append-system-prompt always-think-step-by-step --chrome")).toEqual({
       flags: { "append-system-prompt": "always-think-step-by-step", chrome: null },
+      positionals: [],
+    });
+  });
+
+  it("parses quoted --append-system-prompt with value and --chrome", () => {
+    expect(parseCliArgs(`--append-system-prompt "always think step by step" --chrome`)).toEqual({
+      flags: { "append-system-prompt": "always think step by step", chrome: null },
       positionals: [],
     });
   });

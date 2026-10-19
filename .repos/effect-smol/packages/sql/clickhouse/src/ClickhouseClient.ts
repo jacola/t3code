@@ -1,40 +1,15 @@
 /**
  * ClickHouse driver for Effect SQL, backed by `@clickhouse/client`.
  *
- * Use this module to provide both the ClickHouse-specific
- * {@link ClickhouseClient} service and the generic {@link Client.SqlClient}
- * service. The client is intended for analytical application queries,
- * migrations, background jobs, bulk inserts, and streaming reads that need
- * Effect SQL query compilation, scoped lifecycle management, interruption, and
- * consistent `SqlError` classification for ClickHouse failures.
+ * This module provides both the ClickHouse-specific {@link ClickhouseClient}
+ * service and the generic {@link Client.SqlClient} service. `make` creates a
+ * scoped client, checks the connection with `ping()`, maps ClickHouse errors
+ * to `SqlError`, and aborts in-flight queries when interrupted. The
+ * ClickHouse-specific service adds typed parameters, command execution, insert
+ * queries, query id and settings helpers, a statement compiler, and direct or
+ * config-backed layers.
  *
- * **Mental model**
- *
- * A client owns one scoped `@clickhouse/client` instance and verifies startup
- * with `SELECT 1`. Regular queries use the ClickHouse HTTP `query` API,
- * command-mode effects use `command`, and inserts use `insert`. Interrupting an
- * operation aborts the HTTP request and attempts to kill the generated or
- * supplied `query_id`.
- *
- * **Common tasks**
- *
- * Use {@link layer} with a concrete `ClickhouseClientConfig`,
- * {@link layerConfig} when settings should come from Effect `Config`, and
- * {@link make} when a scoped client value is needed directly. Use
- * `client.param` when a placeholder needs an explicit ClickHouse type,
- * `client.asCommand` for statements that should run through `command`,
- * `client.insertQuery` for bulk inserts, and `client.withClickhouseSettings`
- * or `client.withQueryId` for per-effect request options.
- *
- * **Gotchas**
- *
- * Regular queries read JSON result sets, `executeValues` requests
- * `JSONCompact`, streams request `JSONEachRow`, and `insertQuery` defaults
- * inserts to `JSONEachRow`. The statement compiler emits typed ClickHouse
- * placeholders such as `{p1: Type}`; use `param` when the inferred type is too
- * broad. ClickHouse-specific clauses such as engines, `SETTINGS`, `FORMAT`, or
- * cluster directives must be written explicitly in SQL.
- *
+ * @stability unstable
  * @since 4.0.0
  */
 import * as Clickhouse from "@clickhouse/client"
@@ -46,11 +21,10 @@ import * as Effect from "effect/Effect"
 import * as Fiber from "effect/Fiber"
 import { dual } from "effect/Function"
 import * as Layer from "effect/Layer"
+import * as Reactivity from "effect/reactivity/Reactivity"
 import type * as Scope from "effect/Scope"
-import * as Stream from "effect/Stream"
-import * as Reactivity from "effect/unstable/reactivity/Reactivity"
-import * as Client from "effect/unstable/sql/SqlClient"
-import type { Connection } from "effect/unstable/sql/SqlConnection"
+import * as Client from "effect/sql/SqlClient"
+import type { Connection } from "effect/sql/SqlConnection"
 import {
   AuthenticationError,
   AuthorizationError,
@@ -59,8 +33,9 @@ import {
   SqlSyntaxError,
   StatementTimeoutError,
   UnknownError
-} from "effect/unstable/sql/SqlError"
-import * as Statement from "effect/unstable/sql/Statement"
+} from "effect/sql/SqlError"
+import * as Statement from "effect/sql/Statement"
+import * as Stream from "effect/Stream"
 import * as Crypto from "node:crypto"
 import type { Readable } from "node:stream"
 
@@ -112,6 +87,7 @@ const classifyError = (
 /**
  * Unique runtime identifier used to tag `ClickhouseClient` values.
  *
+ * @stability unstable
  * @category type IDs
  * @since 4.0.0
  */
@@ -120,6 +96,7 @@ export const TypeId: TypeId = "~@effect/sql-clickhouse/ClickhouseClient"
 /**
  * Type-level literal for the `ClickhouseClient` runtime identifier.
  *
+ * @stability unstable
  * @category type IDs
  * @since 4.0.0
  */
@@ -130,7 +107,8 @@ export type TypeId = "~@effect/sql-clickhouse/ClickhouseClient"
  * typed parameter fragments, command-mode execution, insert queries, and
  * per-effect query ID and ClickHouse settings.
  *
- * @category models
+ * @stability unstable
+ * @category services
  * @since 4.0.0
  */
 export interface ClickhouseClient extends Client.SqlClient {
@@ -142,6 +120,7 @@ export interface ClickhouseClient extends Client.SqlClient {
     readonly table: string
     readonly values: Clickhouse.InsertValues<Readable, T>
     readonly format?: Clickhouse.DataFormat
+    readonly columns?: NonNullable<Clickhouse.InsertParams<Readable, T>["columns"]>
   }) => Effect.Effect<Clickhouse.InsertResult, SqlError>
   readonly withQueryId: {
     (queryId: string): <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
@@ -165,7 +144,8 @@ export interface ClickhouseClient extends Client.SqlClient {
  *
  * Use to access or provide a ClickHouse SQL client through the Effect context.
  *
- * @category tags
+ * @stability unstable
+ * @category services
  * @since 4.0.0
  */
 export const ClickhouseClient = Context.Service<ClickhouseClient>("@effect/sql-clickhouse/ClickhouseClient")
@@ -175,7 +155,8 @@ export const ClickhouseClient = Context.Service<ClickhouseClient>("@effect/sql-c
  * `@clickhouse/client` options with optional span attributes and query/result
  * name transforms.
  *
- * @category constructors
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export interface ClickhouseClientConfig extends Clickhouse.ClickHouseClientConfigOptions {
@@ -185,10 +166,11 @@ export interface ClickhouseClientConfig extends Clickhouse.ClickHouseClientConfi
 }
 
 /**
- * Creates a scoped `ClickhouseClient`, verifies connectivity with `SELECT 1`,
+ * Creates a scoped `ClickhouseClient`, verifies connectivity with `ping()`,
  * closes the underlying client when the scope ends, maps ClickHouse failures
  * to `SqlError`, and aborts plus kills in-flight queries when interrupted.
  *
+ * @stability unstable
  * @category constructors
  * @since 4.0.0
  */
@@ -201,16 +183,22 @@ export const make = (
       ? Statement.defaultTransforms(options.transformResultNames).array
       : undefined
 
-    const client = Clickhouse.createClient(options)
+    const client = yield* Effect.acquireRelease(
+      Effect.sync(() => Clickhouse.createClient(options)),
+      (client) => Effect.promise(() => client.close())
+    )
 
-    yield* Effect.acquireRelease(
-      Effect.tryPromise({
-        try: () => client.exec({ query: "SELECT 1" }),
-        catch: (cause) =>
-          new SqlError({ reason: classifyError(cause, "ClickhouseClient: Failed to connect", "connect", "connection") })
-      }),
-      () => Effect.promise(() => client.close())
-    ).pipe(
+    yield* Effect.tryPromise({
+      try: async () => {
+        const result = await client.ping()
+        if (!result.success) {
+          throw result.error
+        }
+        return result
+      },
+      catch: (cause) =>
+        new SqlError({ reason: classifyError(cause, "ClickhouseClient: Failed to connect", "connect", "connection") })
+    }).pipe(
       Effect.timeoutOrElse({
         duration: Duration.seconds(5),
         orElse: () =>
@@ -279,7 +267,12 @@ export const make = (
             }
             return Effect.suspend(() => {
               controller.abort()
-              return Effect.promise(() => this.conn.command({ query: `KILL QUERY WHERE query_id = '${queryId}'` }))
+              return Effect.promise(() =>
+                this.conn.command({
+                  query: "KILL QUERY WHERE query_id = {queryId:String}",
+                  query_params: { queryId }
+                })
+              )
             })
           })
         })
@@ -289,12 +282,11 @@ export const make = (
         return this.runRaw(sql, params, format).pipe(
           Effect.flatMap((result) => {
             if ("json" in result) {
-              return Effect.promise(() =>
-                result.json().then(
-                  (result) => "data" in result ? result.data : result as any,
-                  () => []
-                )
-              )
+              return Effect.tryPromise({
+                try: () => result.json().then((result) => "data" in result ? result.data : result as any),
+                catch: (cause) =>
+                  new SqlError({ reason: classifyError(cause, "Failed to parse result", "parseResult") })
+              })
             }
             return Effect.succeed([])
           })
@@ -315,6 +307,9 @@ export const make = (
       }
       executeValues(sql: string, params: ReadonlyArray<unknown>) {
         return this.run(sql, params, "JSONCompact")
+      }
+      executeValuesUnprepared(sql: string, params: ReadonlyArray<unknown>) {
+        return this.executeValues(sql, params)
       }
       executeUnprepared(sql: string, params: ReadonlyArray<unknown>, transformRows?: any) {
         return this.execute(sql, params, transformRows)
@@ -380,6 +375,7 @@ export const make = (
           readonly table: string
           readonly values: Clickhouse.InsertValues<Readable, T>
           readonly format?: Clickhouse.DataFormat
+          readonly columns?: NonNullable<Clickhouse.InsertParams<Readable, T>["columns"]>
         }) {
           return Effect.callback<Clickhouse.InsertResult, SqlError>((resume) => {
             const fiber = Fiber.getCurrent()!
@@ -399,7 +395,12 @@ export const make = (
             )
             return Effect.suspend(() => {
               controller.abort()
-              return Effect.promise(() => client.command({ query: `KILL QUERY WHERE query_id = '${queryId}'` }))
+              return Effect.promise(() =>
+                client.command({
+                  query: "KILL QUERY WHERE query_id = {queryId:String}",
+                  query_params: { queryId }
+                })
+              )
             })
           })
         },
@@ -422,7 +423,8 @@ export const make = (
  * Fiber reference read by the low-level ClickHouse connection to choose query
  * or command execution for statements; defaults to `query`.
  *
- * @category references
+ * @stability unstable
+ * @category services
  * @since 4.0.0
  */
 export const ClientMethod = Context.Reference<"query" | "command" | "insert">(
@@ -436,7 +438,8 @@ export const ClientMethod = Context.Reference<"query" | "command" | "insert">(
  * Fiber reference for the ClickHouse `query_id` applied to queries and
  * inserts; a random UUID is generated when no query ID is set.
  *
- * @category references
+ * @stability unstable
+ * @category services
  * @since 4.0.0
  */
 export const QueryId = Context.Reference<string | undefined>(
@@ -448,7 +451,8 @@ export const QueryId = Context.Reference<string | undefined>(
  * Fiber reference containing ClickHouse settings to attach to queries,
  * commands, and inserts.
  *
- * @category references
+ * @stability unstable
+ * @category services
  * @since 4.0.0
  */
 export const ClickhouseSettings: Context.Reference<
@@ -461,6 +465,7 @@ export const ClickhouseSettings: Context.Reference<
  * Provides both `ClickhouseClient` and generic `SqlClient` services from a
  * `Config`-backed ClickHouse client configuration.
  *
+ * @stability unstable
  * @category layers
  * @since 4.0.0
  */
@@ -484,6 +489,7 @@ export const layerConfig: (
  * Provides both `ClickhouseClient` and generic `SqlClient` services from a
  * ClickHouse client configuration.
  *
+ * @stability unstable
  * @category layers
  * @since 4.0.0
  */
@@ -507,7 +513,7 @@ const typeFromUnknown = (value: unknown): string => {
   }
   switch (typeof value) {
     case "number":
-      return "Decimal"
+      return "Float64"
     case "bigint":
       return "Int64"
     case "boolean":
@@ -527,12 +533,13 @@ const typeFromUnknown = (value: unknown): string => {
  * `{pN: Type}` placeholders and escaping identifiers with an optional query
  * name transform.
  *
- * @category compiler
+ * @stability unstable
+ * @category constructors
  * @since 4.0.0
  */
 export const makeCompiler = (transform?: (_: string) => string) =>
   Statement.makeCompiler<ClickhouseCustom>({
-    dialect: "sqlite",
+    dialect: "clickhouse",
     placeholder(i, u) {
       return `{p${i}: ${typeFromUnknown(u)}}`
     },
@@ -557,13 +564,14 @@ const escape = Statement.defaultEscape("\"")
  * Custom SQL fragment type used for ClickHouse typed parameters created by
  * `ClickhouseClient.param`.
  *
- * @category custom types
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ClickhouseCustom = ClickhouseParam
 
 /**
- * @category custom types
+ * @category models
  * @since 4.0.0
  */
 interface ClickhouseParam extends Statement.Custom<"ClickhouseParam", string, unknown> {}

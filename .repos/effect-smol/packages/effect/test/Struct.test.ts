@@ -32,6 +32,12 @@ describe("Struct", () => {
       deepStrictEqual(pipe(s, Struct.pick(["a", "b"])), { b: 1 })
       deepStrictEqual(Struct.pick(s, ["a", "b"]), { b: 1 })
     })
+
+    it("numeric properties", () => {
+      const s: { 1: string; 2: number } = { 1: "a", 2: 1 }
+      deepStrictEqual(pipe(s, Struct.pick([1])), { 1: "a" })
+      deepStrictEqual(Struct.pick(s, [1]), { 1: "a" })
+    })
   })
 
   describe("omit", () => {
@@ -45,6 +51,21 @@ describe("Struct", () => {
       const s: { a?: string; b?: number; c?: boolean } = { b: 1, c: true }
       deepStrictEqual(pipe(s, Struct.omit(["c"])), { b: 1 })
       deepStrictEqual(Struct.omit(s, ["c"]), { b: 1 })
+    })
+
+    it("numeric properties", () => {
+      const s: { 1: string; 2: number } = { 1: "a", 2: 1 }
+      deepStrictEqual(pipe(s, Struct.omit([2])), { 1: "a" })
+      deepStrictEqual(Struct.omit(s, [2]), { 1: "a" })
+    })
+
+    it("ignores non-enumerable properties", () => {
+      const hidden = Symbol.for("hidden")
+      const s = { a: "a" }
+      Object.defineProperty(s, "b", { value: 1, enumerable: false })
+      Object.defineProperty(s, hidden, { value: true, enumerable: false })
+
+      deepStrictEqual(Struct.omit(s, []), { a: "a" })
     })
   })
 
@@ -70,6 +91,11 @@ describe("Struct", () => {
   it("renameKeys", () => {
     deepStrictEqual(pipe({ a: "a", b: 1, c: true }, Struct.renameKeys({ a: "A", b: "B" })), { A: "a", B: 1, c: true })
     deepStrictEqual(Struct.renameKeys({ a: "a", b: 1, c: true }, { a: "A", b: "B" }), { A: "a", B: 1, c: true })
+
+    const from = Symbol.for("from")
+    const to = Symbol.for("to")
+    deepStrictEqual(pipe({ [from]: "a", b: 1 }, Struct.renameKeys({ [from]: to })), { [to]: "a", b: 1 })
+    deepStrictEqual(Struct.renameKeys({ a: "a", b: 1 }, { a: to }), { [to]: "a", b: 1 })
   })
 
   it("evolveEntries transforms a selected key and value together", () => {
@@ -111,6 +137,16 @@ describe("Struct", () => {
     )
   })
 
+  it("mapPick numeric properties", () => {
+    equals(
+      Struct.mapPick({ 1: Schema.String, 2: Schema.Number }, [1], Schema.NullOr),
+      {
+        1: Schema.NullOr(Schema.String),
+        2: Schema.Number
+      }
+    )
+  })
+
   it("mapOmit", () => {
     equals(
       pipe({ a: Schema.String, b: Schema.Number }, Struct.mapOmit(["b"], Schema.NullOr)),
@@ -124,6 +160,16 @@ describe("Struct", () => {
       {
         a: Schema.NullOr(Schema.String),
         b: Schema.Number
+      }
+    )
+  })
+
+  it("mapOmit numeric properties", () => {
+    equals(
+      Struct.mapOmit({ 1: Schema.String, 2: Schema.Number }, [2], Schema.NullOr),
+      {
+        1: Schema.NullOr(Schema.String),
+        2: Schema.Number
       }
     )
   })

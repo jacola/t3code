@@ -1,8 +1,8 @@
 import * as AWS from "alchemy/AWS";
 import * as Effect from "effect/Effect";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 
-const main = import.meta.filename;
+const main = import.meta.url;
 
 /**
  * Minimal Lambda for API Gateway `AWS_PROXY` — returns plain text.

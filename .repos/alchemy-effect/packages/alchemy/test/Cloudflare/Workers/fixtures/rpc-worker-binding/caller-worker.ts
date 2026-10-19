@@ -1,8 +1,8 @@
-import * as Cloudflare from "alchemy/Cloudflare";
+import * as Cloudflare from "@/Cloudflare";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
-import * as RpcServer from "effect/unstable/rpc/RpcServer";
+import * as RpcSerialization from "effect/rpc/RpcSerialization";
+import * as RpcServer from "effect/rpc/RpcServer";
 import { CallerRpcs } from "./group.ts";
 import BindingTargetRpcWorker from "./target-worker.ts";
 
@@ -17,7 +17,7 @@ import BindingTargetRpcWorker from "./target-worker.ts";
  */
 export default class BindingCallerRpcWorker extends Cloudflare.RpcWorker<BindingCallerRpcWorker>()(
   "BindingCallerRpcWorker",
-  { main: import.meta.filename, schema: CallerRpcs },
+  { main: import.meta.url, schema: CallerRpcs },
   Effect.gen(function* () {
     const target = yield* Cloudflare.RpcWorker.bind(BindingTargetRpcWorker);
 

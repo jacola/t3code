@@ -11,15 +11,13 @@ export interface BrowserViewportLayout {
   readonly canvasHeight: number;
   readonly viewportX: number;
   readonly viewportY: number;
-  /** Visible footprint inside the preview panel after fit-to-panel scaling. */
   readonly viewportWidth: number;
   readonly viewportHeight: number;
-  /** Presentation-only scale; the guest keeps its requested CSS viewport. */
   readonly viewportScale: number;
   readonly fillsPanel: boolean;
 }
 
-export const BROWSER_DEVICE_TOOLBAR_HEIGHT = 32;
+export const BROWSER_DEVICE_TOOLBAR_HEIGHT = 38;
 export const BROWSER_VIEWPORT_RESIZE_RAIL_SIZE = 10;
 
 export type BrowserViewportResizeDirection =
@@ -39,6 +37,33 @@ export const browserViewportSettingKey = (setting: PreviewViewportSetting): stri
 
 const normalizeZoomFactor = (zoomFactor: number): number =>
   Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
+
+export function resolveFittedBrowserViewport(
+  setting: PreviewViewportSetting,
+  sourceContent: {
+    readonly width: number;
+    readonly height: number;
+    readonly scale: number;
+  } | null,
+  zoomFactor = 1,
+): Exclude<PreviewViewportSetting, { readonly _tag: "fill" }> {
+  if (setting._tag !== "fill") return setting;
+  const normalizedZoomFactor = normalizeZoomFactor(zoomFactor);
+  if (sourceContent) {
+    return {
+      _tag: "freeform",
+      width: Math.max(
+        1,
+        Math.round(sourceContent.width / sourceContent.scale / normalizedZoomFactor),
+      ),
+      height: Math.max(
+        1,
+        Math.round(sourceContent.height / sourceContent.scale / normalizedZoomFactor),
+      ),
+    };
+  }
+  return { _tag: "freeform", width: 1280, height: 800 };
+}
 
 export function resolveBrowserDeviceViewportArea(container: {
   readonly width: number;

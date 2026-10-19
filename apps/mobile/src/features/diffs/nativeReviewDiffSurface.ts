@@ -107,6 +107,8 @@ export interface NativeReviewDiffStyle {
 }
 
 export interface NativeReviewDiffViewProps extends ViewProps {
+  readonly contentInsetTop?: number;
+  readonly contentInsetBottom?: number;
   readonly rowsJson: string;
   readonly tokensJson?: string;
   readonly tokensPatchJson?: string;
@@ -122,6 +124,8 @@ export interface NativeReviewDiffViewProps extends ViewProps {
   readonly rowHeight: number;
   readonly contentWidth: number;
   readonly initialRowIndex?: number;
+  readonly scrollEnabled?: boolean;
+  readonly bounces?: boolean;
   readonly refreshing?: boolean;
   readonly nativeViewRef?: Ref<NativeReviewDiffViewHandle>;
   readonly onPullToRefresh?: (event: NativeSyntheticEvent<Record<string, never>>) => void;
@@ -149,6 +153,10 @@ export interface NativeReviewDiffViewHandle {
   readonly scrollToTop: (animated?: boolean) => Promise<void>;
 }
 
+export function isNativeReviewDiffDrawEvent(payload: Readonly<Record<string, unknown>>): boolean {
+  return payload.message === "draw-metrics" || payload.message === "visible-range";
+}
+
 interface NativeReviewDiffViewRef {
   readonly setRowsJson: (rowsJson: string) => Promise<void>;
   readonly setTokensJson: (tokensJson: string) => Promise<void>;
@@ -161,6 +169,7 @@ type NativeReviewDiffRawViewProps = Omit<
   NativeReviewDiffViewProps,
   "nativeViewRef" | "rowsJson" | "tokensJson" | "tokensPatchJson"
 > & {
+  readonly refreshEnabled: boolean;
   readonly ref?: Ref<NativeReviewDiffViewRef>;
 };
 
@@ -170,9 +179,11 @@ let nativeReviewDiffViewResolutionFailed = false;
 type NativeReviewDiffPayloadMethod = "setRowsJson" | "setTokensJson" | "setTokensPatchJson";
 
 export function isPendingNativeViewRegistration(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
   return (
-    error instanceof Error &&
-    error.message.includes(`Unable to find the '${NATIVE_REVIEW_DIFF_MODULE_NAME}' view`)
+    error.message.includes(`Unable to find the '${NATIVE_REVIEW_DIFF_MODULE_NAME}' view`) ||
+    (error.message.includes("Unable to find the class") &&
+      error.message.includes("T3ReviewDiffView view with tag"))
   );
 }
 
@@ -262,7 +273,11 @@ function NativeReviewDiffView(props: NativeReviewDiffViewProps) {
     return null;
   }
 
-  return createElement(RawNativeView, { ...nativeProps, ref: nativeRef });
+  return createElement(RawNativeView, {
+    ...nativeProps,
+    refreshEnabled: props.onPullToRefresh !== undefined,
+    ref: nativeRef,
+  });
 }
 
 export function resolveNativeReviewDiffView(): ComponentType<NativeReviewDiffViewProps> | null {

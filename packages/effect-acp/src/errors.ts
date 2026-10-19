@@ -1,9 +1,10 @@
 import * as Schema from "effect/Schema";
+import * as SchemaAST from "effect/SchemaAST";
 import type * as SchemaIssue from "effect/SchemaIssue";
 
 import * as AcpSchema from "./_generated/schema.gen.ts";
 
-export const AcpRequestOperation = Schema.Literals([
+const AcpRequestOperation = Schema.Literals([
   "decode-extension-request-payload",
   "encode-extension-response",
   "handle-request",
@@ -11,9 +12,12 @@ export const AcpRequestOperation = Schema.Literals([
   "receive-response",
   "receive-streaming-response",
 ]);
-export type AcpRequestOperation = typeof AcpRequestOperation.Type;
+type AcpRequestOperation = typeof AcpRequestOperation.Type;
 
-export const AcpSchemaIssueKind = Schema.Literals([
+export const AcpRequestId = Schema.Union([Schema.String, Schema.Number]);
+export type AcpRequestId = typeof AcpRequestId.Type;
+
+const AcpSchemaIssueKind = Schema.Literals([
   "Filter",
   "Encoding",
   "Pointer",
@@ -26,13 +30,77 @@ export const AcpSchemaIssueKind = Schema.Literals([
   "Forbidden",
   "OneOf",
 ]);
-export type AcpSchemaIssueKind = typeof AcpSchemaIssueKind.Type;
+type AcpSchemaIssueKind = typeof AcpSchemaIssueKind.Type;
 
-export interface AcpSchemaIssueDiagnostics {
+interface AcpSchemaIssueDiagnostics {
   readonly issueCount: number;
   readonly issueKinds: ReadonlyArray<AcpSchemaIssueKind>;
   readonly maximumPathDepth: number;
 }
+
+const MAX_SUMMARY_ISSUES = 3;
+const MAX_SUMMARY_PATH_SEGMENTS = 8;
+
+const summaryPathSegment = (segment: PropertyKey): string =>
+  typeof segment === "number" || /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(String(segment))
+    ? String(segment)
+    : "*";
+
+const summaryPath = (path: ReadonlyArray<PropertyKey>): string => {
+  if (path.length === 0) return "payload";
+  const shown = path.slice(0, MAX_SUMMARY_PATH_SEGMENTS).map(summaryPathSegment).join(".");
+  return path.length > MAX_SUMMARY_PATH_SEGMENTS ? `${shown}…` : shown;
+};
+
+const summaryReason = (issue: SchemaIssue.Issue): string => {
+  switch (issue._tag) {
+    case "MissingKey":
+      return "missing";
+    case "UnexpectedKey":
+      return "unexpected";
+    case "InvalidType":
+      return "wrong type";
+    default:
+      return "invalid";
+  }
+};
+
+const isCatchAllMember = (issue: SchemaIssue.Issue) =>
+  "ast" in issue && SchemaAST.resolveTitle(issue.ast) === "other";
+
+/**
+ * ACP unions end in a member titled "other" that admits custom and future
+ * variants; it fails only because the discriminator names a known variant, so
+ * the known variant's issues are the ones reported.
+ */
+const schemaIssueSummary = (root: SchemaIssue.Issue): string => {
+  const entries = new Set<string>();
+  const visit = (issue: SchemaIssue.Issue, path: ReadonlyArray<PropertyKey>): void => {
+    switch (issue._tag) {
+      case "Filter":
+      case "Encoding":
+        visit(issue.issue, path);
+        return;
+      case "Pointer":
+        visit(issue.issue, [...path, ...issue.path]);
+        return;
+      case "Composite":
+      case "AnyOf": {
+        const known = issue.issues.filter((child) => !isCatchAllMember(child));
+        const children = known.length > 0 ? known : issue.issues;
+        if (children.length === 0) entries.add(`${summaryPath(path)} ${summaryReason(issue)}`);
+        for (const child of children) visit(child, path);
+        return;
+      }
+      default:
+        entries.add(`${summaryPath(path)} ${summaryReason(issue)}`);
+    }
+  };
+  visit(root, []);
+  const shown = [...entries].slice(0, MAX_SUMMARY_ISSUES);
+  const hidden = entries.size - shown.length;
+  return hidden > 0 ? `${shown.join(", ")} (+${hidden} more)` : shown.join(", ");
+};
 
 const schemaIssueDiagnostics = (root: SchemaIssue.Issue): AcpSchemaIssueDiagnostics => {
   let issueCount = 0;
@@ -68,7 +136,7 @@ const schemaIssueDiagnostics = (root: SchemaIssue.Issue): AcpSchemaIssueDiagnost
 
 export interface AcpRequestDiagnostics {
   readonly method?: string;
-  readonly requestId?: string;
+  readonly requestId?: AcpRequestId;
   readonly operation?: AcpRequestOperation;
   readonly cause?: unknown;
   readonly issueCount?: number;
@@ -76,7 +144,7 @@ export interface AcpRequestDiagnostics {
   readonly maximumPathDepth?: number;
 }
 
-export class AcpSpawnError extends Schema.TaggedErrorClass<AcpSpawnError>()("AcpSpawnError", {
+export class AcpSpawnError extends Schema.TaggedError<AcpSpawnError>()("AcpSpawnError", {
   command: Schema.optional(Schema.String),
   cause: Schema.Defect(),
 }) {
@@ -87,18 +155,20 @@ export class AcpSpawnError extends Schema.TaggedErrorClass<AcpSpawnError>()("Acp
   }
 }
 
-export class AcpProcessExitedError extends Schema.TaggedErrorClass<AcpProcessExitedError>()(
+export class AcpProcessExitedError extends Schema.TaggedError<AcpProcessExitedError>()(
   "AcpProcessExitedError",
   {
     code: Schema.optional(Schema.Number),
     pid: Schema.optionalKey(Schema.Int),
+    stderr: Schema.optionalKey(Schema.String),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message() {
-    return this.code === undefined
-      ? "ACP process exited"
-      : `ACP process exited with code ${this.code}`;
+    const base =
+      this.code === undefined ? "ACP process exited" : `ACP process exited with code ${this.code}`;
+    const excerpt = this.stderr?.trim();
+    return excerpt && excerpt.length > 0 ? `${base}\n${excerpt}` : base;
   }
 }
 
@@ -109,21 +179,23 @@ export const AcpProtocolParseOperation = Schema.Literals([
 ]);
 export type AcpProtocolParseOperation = typeof AcpProtocolParseOperation.Type;
 
-export class AcpProtocolParseError extends Schema.TaggedErrorClass<AcpProtocolParseError>()(
+export class AcpProtocolParseError extends Schema.TaggedError<AcpProtocolParseError>()(
   "AcpProtocolParseError",
   {
     operation: AcpProtocolParseOperation,
     method: Schema.optionalKey(Schema.String),
-    requestId: Schema.optionalKey(Schema.String),
+    requestId: Schema.optionalKey(AcpRequestId),
     issueCount: Schema.optionalKey(Schema.Number),
     issueKinds: Schema.optionalKey(Schema.Array(AcpSchemaIssueKind)),
     maximumPathDepth: Schema.optionalKey(Schema.Number),
+    issueSummary: Schema.optionalKey(Schema.String),
     cause: Schema.Defect(),
   },
 ) {
   override get message() {
     const method = this.method === undefined ? "" : ` for method '${this.method}'`;
-    return `ACP protocol operation '${this.operation}' failed${method}.`;
+    const summary = this.issueSummary === undefined ? "" : `: ${this.issueSummary}`;
+    return `ACP protocol operation '${this.operation}' failed${method}${summary}.`;
   }
 
   static fromSchemaError(
@@ -135,13 +207,14 @@ export class AcpProtocolParseError extends Schema.TaggedErrorClass<AcpProtocolPa
       operation,
       method,
       ...schemaIssueDiagnostics(cause.issue),
+      issueSummary: schemaIssueSummary(cause.issue),
       cause,
     });
   }
 
   static fromEncodingError(
     method: string | undefined,
-    requestId: string | undefined,
+    requestId: AcpRequestId | undefined,
     cause: unknown,
   ) {
     return new AcpProtocolParseError({
@@ -153,7 +226,7 @@ export class AcpProtocolParseError extends Schema.TaggedErrorClass<AcpProtocolPa
   }
 }
 
-export class AcpTransportError extends Schema.TaggedErrorClass<AcpTransportError>()(
+export class AcpTransportError extends Schema.TaggedError<AcpTransportError>()(
   "AcpTransportError",
   {
     operation: Schema.optional(
@@ -173,7 +246,7 @@ export class AcpTransportError extends Schema.TaggedErrorClass<AcpTransportError
   }
 }
 
-export class AcpInputStreamEndedError extends Schema.TaggedErrorClass<AcpInputStreamEndedError>()(
+export class AcpInputStreamEndedError extends Schema.TaggedError<AcpInputStreamEndedError>()(
   "AcpInputStreamEndedError",
   {},
 ) {
@@ -182,12 +255,12 @@ export class AcpInputStreamEndedError extends Schema.TaggedErrorClass<AcpInputSt
   }
 }
 
-export class AcpRequestError extends Schema.TaggedErrorClass<AcpRequestError>()("AcpRequestError", {
+export class AcpRequestError extends Schema.TaggedError<AcpRequestError>()("AcpRequestError", {
   code: AcpSchema.ErrorCode,
   errorMessage: Schema.String,
   data: Schema.optional(Schema.Unknown),
   method: Schema.optionalKey(Schema.String),
-  requestId: Schema.optionalKey(Schema.String),
+  requestId: Schema.optionalKey(AcpRequestId),
   operation: Schema.optionalKey(AcpRequestOperation),
   issueCount: Schema.optionalKey(Schema.Number),
   issueKinds: Schema.optionalKey(Schema.Array(AcpSchemaIssueKind)),
@@ -202,7 +275,7 @@ export class AcpRequestError extends Schema.TaggedErrorClass<AcpRequestError>()(
     error: AcpSchema.Error,
     context: {
       readonly method: string;
-      readonly requestId?: string;
+      readonly requestId?: AcpRequestId;
       readonly cause?: unknown;
     },
   ) {
@@ -217,7 +290,7 @@ export class AcpRequestError extends Schema.TaggedErrorClass<AcpRequestError>()(
     });
   }
 
-  static fromExtensionResponseFailure(method: string, requestId: string, cause: unknown) {
+  static fromExtensionResponseFailure(method: string, requestId: AcpRequestId, cause: unknown) {
     return AcpRequestError.internalError("Extension request failed", undefined, {
       method,
       requestId,
@@ -228,7 +301,7 @@ export class AcpRequestError extends Schema.TaggedErrorClass<AcpRequestError>()(
 
   static fromExtensionResponseEncodingError(
     method: string,
-    requestId: string,
+    requestId: AcpRequestId,
     cause: AcpProtocolParseError,
   ) {
     return AcpRequestError.internalError("Internal error", undefined, {
@@ -239,7 +312,7 @@ export class AcpRequestError extends Schema.TaggedErrorClass<AcpRequestError>()(
     });
   }
 
-  static unsupportedStreamingResponse(method: string, requestId: string) {
+  static unsupportedStreamingResponse(method: string, requestId: AcpRequestId) {
     return AcpRequestError.internalError(
       "Streaming extension responses are not supported",
       undefined,

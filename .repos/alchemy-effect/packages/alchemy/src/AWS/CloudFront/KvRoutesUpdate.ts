@@ -1,7 +1,10 @@
+import * as cloudfront from "@distilled.cloud/aws/cloudfront";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import * as kvs from "@distilled.cloud/aws/cloudfront-keyvaluestore";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
-import type { HttpClient } from "effect/unstable/http/HttpClient";
+import type { HttpClient } from "effect/http/HttpClient";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
@@ -11,6 +14,7 @@ import {
   extractValue,
   getKvsEtag,
   isKvsPreconditionFailed,
+  cappedKvsRetrySchedule,
   retryForKvsReadiness,
   withKvsRegionFn,
 } from "./common.ts";
@@ -30,9 +34,21 @@ export interface KvRoutesUpdate extends Resource<
   "AWS.CloudFront.KvRoutesUpdate",
   KvRoutesUpdateProps,
   {
+    /**
+     * The ARN of the key value store holding the routes.
+     */
     store: string;
+    /**
+     * The namespace prefix the routes were written under.
+     */
     namespace: string;
+    /**
+     * The key the route table was written to.
+     */
     key: string;
+    /**
+     * The serialized route table value that was written.
+     */
     entry: string;
   },
   never,
@@ -44,9 +60,8 @@ export interface KvRoutesUpdate extends Resource<
  *
  * The routes array is stored at key `{namespace}:{key}` and supports automatic
  * chunking when the serialized array exceeds 1000 characters.
- *
- * @section Managing Routes
- * @example Add A Route Entry
+ * ### Managing Routes
+ * **Example:** Add A Route Entry
  * ```typescript
  * const update = yield* KvRoutesUpdate("MyRoute", {
  *   store: store.keyValueStoreArn,
@@ -55,6 +70,8 @@ export interface KvRoutesUpdate extends Resource<
  *   entry: "site,mysite,*,/",
  * });
  * ```
+ *
+ * @resource
  */
 export const KvRoutesUpdate = Resource<KvRoutesUpdate>(
   "AWS.CloudFront.KvRoutesUpdate",
@@ -176,6 +193,7 @@ export const KvRoutesUpdateProvider = () =>
           const fullKey = `${props.namespace}:${props.key}`;
           const etag = yield* getKvsEtag(props.store);
           const { routes, chunkNum } = yield* getRoutes(props.store, fullKey);
+          if (!routes.includes(props.entry)) return;
           const filtered = routes.filter((r) => r !== props.entry);
           if (filtered.length === 0) {
             yield* deleteKey(props.store, etag, fullKey, chunkNum);
@@ -187,9 +205,7 @@ export const KvRoutesUpdateProvider = () =>
             while: (error) =>
               error._tag === "ValidationException" &&
               isKvsPreconditionFailed(error),
-            schedule: Schedule.exponential("100 millis").pipe(
-              Schedule.both(Schedule.recurs(24)),
-            ),
+            schedule: cappedKvsRetrySchedule,
           }),
         );
 
@@ -219,13 +235,16 @@ export const KvRoutesUpdateProvider = () =>
             while: (error) =>
               error._tag === "ValidationException" &&
               isKvsPreconditionFailed(error),
-            schedule: Schedule.exponential("100 millis").pipe(
-              Schedule.both(Schedule.recurs(24)),
-            ),
+            schedule: cappedKvsRetrySchedule,
           }),
         );
 
       return {
+        // Non-listable: this resource is an update operation that manages a
+        // single route entry inside a JSON array stored at a KV store key. It is
+        // keyed entirely by {store, namespace, key, entry}; there is no API that
+        // enumerates individual route-entry updates, so list returns [].
+        list: () => Effect.succeed([]),
         read: withKvsRegionFn(
           Effect.fn(function* ({ output }) {
             return output;
@@ -285,7 +304,22 @@ export const KvRoutesUpdateProvider = () =>
                 namespace: output.namespace,
                 key: output.key,
                 entry: output.entry,
-              }),
+              }).pipe(
+                Effect.catchTag("ConflictException", (error) =>
+                  // The data plane reports ConflictException for deleted stores.
+                  // Confirm absence through the control plane before ignoring it.
+                  cloudfront.listKeyValueStores.pages({}).pipe(
+                    Stream.flatMap((page) =>
+                      Stream.fromIterable(page.KeyValueStoreList?.Items ?? []),
+                    ),
+                    Stream.filter((store) => store.ARN === output.store),
+                    Stream.runHead,
+                    Effect.flatMap((store) =>
+                      Option.isNone(store) ? Effect.void : Effect.fail(error),
+                    ),
+                  ),
+                ),
+              ),
             ).pipe(
               Effect.catchTag("ResourceNotFoundException", () => Effect.void),
             );

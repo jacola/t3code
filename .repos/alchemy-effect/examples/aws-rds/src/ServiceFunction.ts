@@ -2,15 +2,15 @@ import * as AWS from "alchemy/AWS";
 import { Stack } from "alchemy/Stack";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import { HttpServerRequest } from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import { Database, DatabaseAurora } from "./Database.ts";
 import { NetworkLive } from "./Network.ts";
 
 export default class ServiceFunction extends AWS.Lambda.Function<ServiceFunction>()(
   "ServiceFunction",
   Stack.useSync((stack) => ({
-    main: import.meta.filename,
+    main: import.meta.url,
     memory: stack.stage === "prod" ? 1024 : 512,
     runtime: "nodejs24.x",
   })),
@@ -64,7 +64,7 @@ export default class ServiceFunction extends AWS.Lambda.Function<ServiceFunction
     Effect.provide(
       Layer.provideMerge(
         Layer.mergeAll(DatabaseAurora),
-        Layer.mergeAll(NetworkLive, AWS.RDS.ConnectLive),
+        Layer.mergeAll(NetworkLive, AWS.RDS.ConnectHttp),
       ),
     ),
   ),

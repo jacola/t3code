@@ -1,13 +1,13 @@
 import * as Cloudflare from "@/Cloudflare";
-import * as Test from "@/Test/Vitest";
-import { expect } from "@effect/vitest";
+import * as Test from "@/Test/Alchemy";
+import { expect } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import { MinimumLogLevel } from "effect/References";
 import * as Schedule from "effect/Schedule";
-import * as HttpClient from "effect/unstable/http/HttpClient";
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import type { HttpClientResponse } from "effect/unstable/http/HttpClientResponse";
-import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import type { HttpClientResponse } from "effect/http/HttpClientResponse";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import { TaskApi } from "./fixtures/http-api/api.ts";
 import Stack from "./fixtures/http-api/stack.ts";
 
@@ -29,11 +29,13 @@ const requestTimeout = "5 seconds";
 // requests landing on a cold PoP return a `404` (route not resolvable) or a
 // `500` (script up, binding not ready). New DO namespaces / D1 databases are
 // the slowest, so the readiness window comfortably exceeds 15s in the tail.
-// Retry on a steady 1.5s cadence for ~30s so every first-touch request rides
-// out the convergence window regardless of which PoP it hits.
+// Retry on a steady 1.5s cadence for ~60s so every first-touch request rides
+// out the convergence window regardless of which PoP it hits. Under a
+// full-suite run (dozens of concurrent deploys) fresh DO namespaces have
+// been observed to serve 500s for well over 30s before converging.
 const readinessRetry = {
   schedule: Schedule.spaced("1500 millis"),
-  times: 20,
+  times: 40,
 } as const;
 
 const makeClient = (url: string) =>
@@ -49,7 +51,7 @@ const requestUntilReady = (
   effect.pipe(
     Effect.timeout(requestTimeout),
     Effect.flatMap(
-      Effect.fnUntraced(function* (res) {
+      Effect.fn(function* (res) {
         return res.status >= 200 && res.status < 300
           ? res
           : yield* Effect.fail(
@@ -106,17 +108,37 @@ test(
     expect(fetched.id).toBe(created.id);
     expect(fetched.title).toBe("Write docs");
 
-    // No retry here: `TaskNotFound` is the expected domain result, not a
-    // transient readiness failure — retrying would just re-run the 404.
+    // The "missing task" path must surface the worker's domain `TaskNotFound`,
+    // not a transient edge `HttpClientError` (a cold PoP that returns a raw
+    // 404/500 placeholder before the script resolves). Retry every *non-domain*
+    // failure through the readiness window and stop the instant we observe
+    // `TaskNotFound` — so we never re-run the real domain 404, but we do ride
+    // out cold-start transport errors.
     const missing = yield* client.Tasks.getTask({
       params: { id: "does-not-exist" },
-    }).pipe(Effect.flip);
+    }).pipe(
+      Effect.timeout(requestTimeout),
+      Effect.retry({
+        while: (e) => e._tag !== "TaskNotFound",
+        schedule: readinessRetry.schedule,
+        times: readinessRetry.times,
+      }),
+      Effect.flip,
+    );
     expect(missing._tag).toBe("TaskNotFound");
     if (missing._tag === "TaskNotFound") {
       expect(missing.id).toBe("does-not-exist");
     }
   }).pipe(logLevel),
-  { timeout: testTimeout },
+  {
+    tags: [
+      "provider:cloudflare",
+      "provider:cloudflare:r2",
+      "provider:cloudflare:worker",
+      "live",
+    ],
+    timeout: testTimeout,
+  },
 );
 
 test(
@@ -140,7 +162,15 @@ test(
     );
     expect(res.headers["access-control-allow-origin"]).toBeDefined();
   }).pipe(logLevel),
-  { timeout: testTimeout },
+  {
+    tags: [
+      "provider:cloudflare",
+      "provider:cloudflare:r2",
+      "provider:cloudflare:worker",
+      "live",
+    ],
+    timeout: testTimeout,
+  },
 );
 
 test(
@@ -160,7 +190,15 @@ test(
     expect(res.status).toBe(200);
     expect(res.headers["access-control-allow-origin"]).toBeDefined();
   }).pipe(logLevel),
-  { timeout: testTimeout },
+  {
+    tags: [
+      "provider:cloudflare",
+      "provider:cloudflare:r2",
+      "provider:cloudflare:worker",
+      "live",
+    ],
+    timeout: testTimeout,
+  },
 );
 
 test(
@@ -190,7 +228,15 @@ test(
     expect(results).toHaveLength(N);
     expect(new Set(results).size).toBe(N);
   }).pipe(logLevel),
-  { timeout: burstTimeout },
+  {
+    tags: [
+      "provider:cloudflare",
+      "provider:cloudflare:r2",
+      "provider:cloudflare:worker",
+      "live",
+    ],
+    timeout: burstTimeout,
+  },
 );
 
 test(
@@ -221,5 +267,13 @@ test(
       { concurrency: 32 },
     );
   }).pipe(logLevel),
-  { timeout: burstTimeout },
+  {
+    tags: [
+      "provider:cloudflare",
+      "provider:cloudflare:r2",
+      "provider:cloudflare:worker",
+      "live",
+    ],
+    timeout: burstTimeout,
+  },
 );

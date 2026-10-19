@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { retryOrganizations } from "./common.ts";
+import { retryOrganizations, unredact } from "./common.ts";
 
 export type OrganizationId = string;
 export type OrganizationArn = string;
@@ -21,14 +21,34 @@ export interface Organization extends Resource<
   "AWS.Organizations.Organization",
   OrganizationProps,
   {
+    /**
+     * ID of the organization (e.g. `o-exampleorgid`).
+     */
     organizationId: OrganizationId;
+    /**
+     * ARN of the organization.
+     */
     organizationArn: OrganizationArn;
+    /**
+     * Feature set enabled on the organization (`ALL` or
+     * `CONSOLIDATED_BILLING`).
+     */
     featureSet: organizations.OrganizationFeatureSet | undefined;
+    /**
+     * ARN of the management account.
+     */
     managementAccountArn: string | undefined;
+    /**
+     * 12-digit ID of the management account.
+     */
     managementAccountId: string | undefined;
-    managementAccountEmail:
-      | organizations.Organization["MasterAccountEmail"]
-      | undefined;
+    /**
+     * Email address of the management account.
+     */
+    managementAccountEmail: string | undefined;
+    /**
+     * Policy types available to the organization.
+     */
     availablePolicyTypes: organizations.PolicyTypeSummary[];
   },
   never,
@@ -40,14 +60,15 @@ export interface Organization extends Resource<
  *
  * This is a singleton-style resource. If an organization already exists,
  * Alchemy adopts and reconciles it instead of creating a second one.
- *
- * @section Creating An Organization
- * @example Full Features Organization
+ * ### Creating An Organization
+ * **Example:** Full Features Organization
  * ```typescript
  * const organization = yield* Organization("Org", {
  *   featureSet: "ALL",
  * });
  * ```
+ *
+ * @resource
  */
 export const Organization = Resource<Organization>(
   "AWS.Organizations.Organization",
@@ -64,6 +85,15 @@ export const OrganizationProvider = () =>
           const org = yield* readOrganization();
           return org?.Id && org.Arn ? toAttrs(org) : undefined;
         }),
+        // Account singleton: there is at most one organization per management
+        // account and no list API. `describeOrganization` (via `readOrganization`)
+        // returns the single org, or the typed `AWSOrganizationsNotInUseException`
+        // is caught to `undefined` when the account isn't a management account.
+        list: () =>
+          Effect.gen(function* () {
+            const org = yield* readOrganization();
+            return org?.Id && org.Arn ? [toAttrs(org)] : [];
+          }),
         reconcile: Effect.fn(function* ({ news, session }) {
           const desiredFeatureSet = news.featureSet ?? "ALL";
 
@@ -131,7 +161,7 @@ const toAttrs = (
   featureSet: org.FeatureSet,
   managementAccountArn: org.MasterAccountArn,
   managementAccountId: org.MasterAccountId,
-  managementAccountEmail: org.MasterAccountEmail,
+  managementAccountEmail: unredact(org.MasterAccountEmail),
   availablePolicyTypes: org.AvailablePolicyTypes ?? [],
 });
 

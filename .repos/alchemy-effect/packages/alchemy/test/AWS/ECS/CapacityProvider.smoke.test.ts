@@ -1,8 +1,8 @@
 import * as AWS from "@/AWS";
 import { CapacityProvider } from "@/AWS/ECS";
-import * as Test from "@/Test/Vitest";
+import * as Test from "@/Test/Alchemy";
 import * as ecs from "@distilled.cloud/aws/ecs";
-import { expect } from "@effect/vitest";
+import { expect } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import { MinimumLogLevel } from "effect/References";
 
@@ -79,5 +79,5 @@ test.provider.skipIf(!process.env.TEST_ASG_ARN)(
       });
       expect(afterDestroy.capacityProviders ?? []).toHaveLength(0);
     }).pipe(logLevel),
-  { timeout: 600_000 },
+  { tags: ["provider:aws", "provider:aws:ecs", "live"], timeout: 600_000 },
 );

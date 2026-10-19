@@ -1,17 +1,17 @@
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
-import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import { HttpServerRequest } from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import { ApiKey } from "./ApiKey.ts";
 
 export default class Api extends Cloudflare.Worker<Api>()(
   "Api",
   {
-    main: import.meta.filename,
+    main: import.meta.url,
   },
   Effect.gen(function* () {
-    const apiKey = yield* Cloudflare.Secret.bind(ApiKey);
+    const apiKey = yield* Cloudflare.SecretsStore.ReadSecret(ApiKey);
 
     return {
       fetch: Effect.gen(function* () {
@@ -36,5 +36,5 @@ export default class Api extends Cloudflare.Worker<Api>()(
         ),
       ),
     };
-  }).pipe(Effect.provide(Cloudflare.SecretBindingLive)),
+  }).pipe(Effect.provide(Cloudflare.SecretsStore.ReadSecretBinding)),
 ) {}

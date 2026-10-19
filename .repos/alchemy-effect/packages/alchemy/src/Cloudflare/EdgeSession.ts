@@ -1,8 +1,9 @@
+import { DEFAULT_COMPATIBILITY_DATE } from "@alchemy.run/cloudflare-runtime/core/internal/constants";
 import { Credentials } from "@distilled.cloud/cloudflare/Credentials";
 import * as workers from "@distilled.cloud/cloudflare/workers";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
-import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClient from "effect/http/HttpClient";
 import { Access } from "./Access.ts";
 import { CloudflareEnvironment } from "./CloudflareEnvironment.ts";
 
@@ -33,7 +34,7 @@ export interface EdgeSessionOptions {
   readonly files: ReadonlyArray<File>;
   /** Remote bindings attached to the preview worker. */
   readonly bindings: ReadonlyArray<EdgeBinding>;
-  /** @default "2025-04-28" */
+  /** @default "2026-08-31" */
   readonly compatibilityDate?: string;
 }
 
@@ -47,8 +48,6 @@ export interface EdgeSessionHandle {
   readonly headers: Record<string, string>;
 }
 
-const DEFAULT_COMPATIBILITY_DATE = "2025-04-28";
-
 const wrap = <A, E, R>(effect: Effect.Effect<A, E, R>, message: string) =>
   effect.pipe(
     Effect.mapError((cause) => new EdgeSessionError({ message, cause })),
@@ -61,7 +60,7 @@ const wrap = <A, E, R>(effect: Effect.Effect<A, E, R>, message: string) =>
  * to the original if the exchange fails.
  */
 const createUploadToken = Effect.gen(function* () {
-  const env = yield* CloudflareEnvironment;
+  const env = yield* yield* CloudflareEnvironment;
   const http = yield* HttpClient.HttpClient;
   const createSubdomainEdgePreviewSession =
     yield* workers.createSubdomainEdgePreviewSession;
@@ -87,7 +86,7 @@ const createUploadToken = Effect.gen(function* () {
 
 const uploadScript = (options: EdgeSessionOptions, uploadToken: string) =>
   Effect.gen(function* () {
-    const env = yield* CloudflareEnvironment;
+    const env = yield* yield* CloudflareEnvironment;
     const createScriptEdgePreview = yield* workers.createScriptEdgePreview;
     return yield* createScriptEdgePreview({
       accountId: env.accountId,
@@ -109,9 +108,10 @@ const uploadScript = (options: EdgeSessionOptions, uploadToken: string) =>
 
 const workerHost = (scriptName: string) =>
   Effect.gen(function* () {
-    const env = yield* CloudflareEnvironment;
-    const getSubdomain = yield* workers.getSubdomain;
-    const { subdomain } = yield* getSubdomain({ accountId: env.accountId });
+    const env = yield* yield* CloudflareEnvironment;
+    const { subdomain } = yield* workers.getSubdomain({
+      accountId: env.accountId,
+    });
     return `${scriptName}.${subdomain}.workers.dev`;
   });
 

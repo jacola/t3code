@@ -15,7 +15,6 @@ export interface TerminalMenuSession {
   readonly cwd: string | null;
   readonly status: "starting" | "running" | "exited" | "error" | "closed";
   readonly hasRunningSubprocess: boolean;
-  /** Server-authoritative title with the same fallback rules as web. */
   readonly displayLabel: string;
   readonly updatedAt: string | null;
 }
@@ -63,22 +62,23 @@ export function getTerminalStatusLabel(input: {
 }
 
 /**
- * Picks an id for "open another shell". Counts the terminal screen already mounted
- * (`activeRouteTerminalId`) as occupied so an empty session list on the primary route
- * still advances to `term-2` instead of `replace`-navigating to the same `default` tab.
+ * Counts the terminal screen already mounted (`activeRouteTerminalId`) as occupied so
+ * an empty session list on the primary route still advances to `term-2` instead of
+ * `replace`-navigating to the same `default` tab.
  */
 export function nextOpenTerminalId(input: {
   readonly listedTerminalIds: ReadonlyArray<string>;
   readonly activeRouteTerminalId?: string | null;
+  readonly uniqueSuffix?: string;
 }): string {
   const listed = input.listedTerminalIds.filter((id) => id.trim().length > 0);
   const routeId = input.activeRouteTerminalId?.trim() ? input.activeRouteTerminalId : null;
 
   if (!routeId || listed.includes(routeId)) {
-    return nextTerminalId(listed);
+    return nextTerminalId(listed, input.uniqueSuffix);
   }
 
-  return nextTerminalId([...listed, routeId]);
+  return nextTerminalId([...listed, routeId], input.uniqueSuffix);
 }
 
 export function buildTerminalMenuSessions(input: {
@@ -114,19 +114,43 @@ export function buildTerminalMenuSessions(input: {
   return Arr.sort(sessionsById.values(), terminalMenuSessionOrder);
 }
 
+/**
+ * Returns null when no other live session remains and the terminal UI should
+ * be dismissed instead.
+ */
+export function previousLiveTerminalId(input: {
+  readonly sessions: ReadonlyArray<TerminalMenuSession>;
+  readonly exitedTerminalId: string;
+}): string | null {
+  const live = Arr.sort(
+    input.sessions.filter(
+      (session) =>
+        session.terminalId !== input.exitedTerminalId &&
+        (session.status === "running" || session.status === "starting"),
+    ),
+    terminalMenuSessionOrder,
+  );
+  if (live.length === 0) {
+    return null;
+  }
+
+  const below = live.filter(
+    (session) =>
+      session.terminalId.localeCompare(input.exitedTerminalId, undefined, { numeric: true }) < 0,
+  );
+  return (below[below.length - 1] ?? live[0])?.terminalId ?? null;
+}
+
 export function resolveProjectScriptTerminalId(input: {
   readonly existingTerminalIds: ReadonlyArray<string>;
   readonly hasRunningTerminal: boolean;
+  readonly uniqueSuffix?: string;
 }): string {
-  if (!input.hasRunningTerminal) {
+  if (!input.hasRunningTerminal && input.uniqueSuffix === undefined) {
     return DEFAULT_TERMINAL_ID;
   }
 
-  return nextTerminalId(input.existingTerminalIds);
-}
-
-export function projectScriptMenuLabel(script: ProjectScript): string {
-  return script.runOnWorktreeCreate ? `${script.name} (setup)` : script.name;
+  return nextTerminalId(input.existingTerminalIds, input.uniqueSuffix);
 }
 
 export function projectScriptMenuIcon(icon: ProjectScript["icon"]) {

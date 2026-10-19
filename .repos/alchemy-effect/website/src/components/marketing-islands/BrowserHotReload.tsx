@@ -129,7 +129,7 @@ const DIFF_LINE = mkLine(
     </span>
     <span
       style={{ color: "var(--alc-code-comment)" }}
-    >{` (Cloudflare.Queue)`}</span>
+    >{` (Cloudflare.Queues.Queue)`}</span>
     <span style={{ color: "var(--alc-success)" }}> created</span>
   </>,
 );
@@ -252,7 +252,8 @@ function BrowserChrome({
   style?: CSSProperties;
 }) {
   return (
-    <div className="bhr-browser" style={style}>
+    // Simulated browser chrome — decoration, kept out of search snippets.
+    <div className="bhr-browser" style={style} data-nosnippet="">
       <div className="bhr-browser__header">
         <span
           className="alc-code-block__dot"
@@ -339,10 +340,10 @@ export default function BrowserHotReload() {
 
           switch (next) {
             case "boot-photos":
-              push(bootLine("Photos", "Cloudflare.R2Bucket"));
+              push(bootLine("Photos", "Cloudflare.R2.Bucket"));
               break;
             case "boot-sessions":
-              push(bootLine("Sessions", "Cloudflare.KVNamespace"));
+              push(bootLine("Sessions", "Cloudflare.KV.Namespace"));
               break;
             case "boot-api":
               push(bootLine("Api", "Cloudflare.Worker · local → workerd"));

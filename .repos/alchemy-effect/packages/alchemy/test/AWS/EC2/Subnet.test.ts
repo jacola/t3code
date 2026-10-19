@@ -1,8 +1,9 @@
 import * as AWS from "@/AWS";
 import { Subnet, Vpc } from "@/AWS/EC2";
-import * as Test from "@/Test/Vitest";
+import * as Provider from "@/Provider";
+import * as Test from "./VpcTest.ts";
 import * as EC2 from "@distilled.cloud/aws/ec2";
-import { expect } from "@effect/vitest";
+import { expect } from "alchemy-test";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import { MinimumLogLevel } from "effect/References";
@@ -15,59 +16,93 @@ const logLevel = Effect.provideService(
   process.env.DEBUG ? "Debug" : "Info",
 );
 
-test.provider("create, update, delete subnet", (stack) =>
-  Effect.gen(function* () {
-    yield* stack.destroy();
+test.provider(
+  "create, update, delete subnet",
+  (stack) =>
+    Effect.gen(function* () {
+      yield* stack.destroy();
 
-    const { vpc, subnet } = yield* stack.deploy(
-      Effect.gen(function* () {
-        const vpc = yield* Vpc("TestVpc", {
-          cidrBlock: "10.0.0.0/16",
-        });
-        const subnet = yield* Subnet("TestSubnet", {
-          vpcId: vpc.vpcId,
-          cidrBlock: "10.0.1.0/24",
-        });
-        return { vpc, subnet };
-      }),
-    );
+      const { vpc, subnet } = yield* stack.deploy(
+        Effect.gen(function* () {
+          const vpc = yield* Vpc("TestVpc", {
+            cidrBlock: "10.0.0.0/16",
+          });
+          const subnet = yield* Subnet("TestSubnet", {
+            vpcId: vpc.vpcId,
+            cidrBlock: "10.0.1.0/24",
+          });
+          return { vpc, subnet };
+        }),
+      );
 
-    const actualSubnet = yield* EC2.describeSubnets({
-      SubnetIds: [subnet.subnetId],
-    });
+      const actualSubnet = yield* EC2.describeSubnets({
+        SubnetIds: [subnet.subnetId],
+      });
 
-    expect(actualSubnet.Subnets?.[0]?.SubnetId).toEqual(subnet.subnetId);
-    expect(actualSubnet.Subnets?.[0]?.CidrBlock).toEqual("10.0.1.0/24");
-    expect(actualSubnet.Subnets?.[0]?.VpcId).toEqual(vpc.vpcId);
-    expect(actualSubnet.Subnets?.[0]?.State).toEqual("available");
-    expect(actualSubnet.Subnets?.[0]?.MapPublicIpOnLaunch).toEqual(false);
+      expect(actualSubnet.Subnets?.[0]?.SubnetId).toEqual(subnet.subnetId);
+      expect(actualSubnet.Subnets?.[0]?.CidrBlock).toEqual("10.0.1.0/24");
+      expect(actualSubnet.Subnets?.[0]?.VpcId).toEqual(vpc.vpcId);
+      expect(actualSubnet.Subnets?.[0]?.State).toEqual("available");
+      expect(actualSubnet.Subnets?.[0]?.MapPublicIpOnLaunch).toEqual(false);
 
-    // Update subnet attributes
-    const { subnet: updatedSubnet } = yield* stack.deploy(
-      Effect.gen(function* () {
-        const vpc = yield* Vpc("TestVpc", {
-          cidrBlock: "10.0.0.0/16",
-        });
-        const subnet = yield* Subnet("TestSubnet", {
-          vpcId: vpc.vpcId,
-          cidrBlock: "10.0.1.0/24",
-          mapPublicIpOnLaunch: true,
-        });
-        return { vpc, subnet };
-      }),
-    );
+      // Update subnet attributes
+      const { subnet: updatedSubnet } = yield* stack.deploy(
+        Effect.gen(function* () {
+          const vpc = yield* Vpc("TestVpc", {
+            cidrBlock: "10.0.0.0/16",
+          });
+          const subnet = yield* Subnet("TestSubnet", {
+            vpcId: vpc.vpcId,
+            cidrBlock: "10.0.1.0/24",
+            mapPublicIpOnLaunch: true,
+          });
+          return { vpc, subnet };
+        }),
+      );
 
-    yield* expectSubnetAttribute({
-      SubnetId: updatedSubnet.subnetId,
-      Attribute: "mapPublicIpOnLaunch",
-      Value: true,
-    });
+      yield* expectSubnetAttribute({
+        SubnetId: updatedSubnet.subnetId,
+        Attribute: "mapPublicIpOnLaunch",
+        Value: true,
+      });
 
-    // Delete subnet and VPC
-    yield* stack.destroy();
+      // Delete subnet and VPC
+      yield* stack.destroy();
 
-    yield* assertSubnetDeleted(subnet.subnetId);
-  }).pipe(logLevel),
+      yield* assertSubnetDeleted(subnet.subnetId);
+    }).pipe(logLevel),
+  { tags: ["provider:aws", "provider:aws:ec2", "live"] },
+);
+
+test.provider(
+  "list enumerates the deployed subnet",
+  (stack) =>
+    Effect.gen(function* () {
+      yield* stack.destroy();
+
+      const { subnet } = yield* stack.deploy(
+        Effect.gen(function* () {
+          const vpc = yield* Vpc("ListVpc", {
+            cidrBlock: "10.0.0.0/16",
+          });
+          const subnet = yield* Subnet("ListSubnet", {
+            vpcId: vpc.vpcId,
+            cidrBlock: "10.0.1.0/24",
+          });
+          return { vpc, subnet };
+        }),
+      );
+
+      const provider = yield* Provider.findProvider(Subnet);
+      const all = yield* provider.list();
+
+      expect(all.some((s) => s.subnetId === subnet.subnetId)).toBe(true);
+
+      yield* stack.destroy();
+
+      yield* assertSubnetDeleted(subnet.subnetId);
+    }).pipe(logLevel),
+  { tags: ["provider:aws", "provider:aws:ec2", "live"] },
 );
 
 const expectSubnetAttribute = Effect.fn(function* (props: {
@@ -92,7 +127,7 @@ const expectSubnetAttribute = Effect.fn(function* (props: {
     }),
     Effect.retry({
       while: (e) => e instanceof SubnetAttributeStale,
-      schedule: Schedule.exponential(100),
+      schedule: Schedule.max([Schedule.exponential(100), Schedule.recurs(8)]),
     }),
   );
 });
@@ -104,7 +139,7 @@ const assertSubnetDeleted = Effect.fn(function* (subnetId: string) {
     Effect.flatMap(() => Effect.fail(new SubnetStillExists())),
     Effect.retry({
       while: (e) => e instanceof SubnetStillExists,
-      schedule: Schedule.exponential(100),
+      schedule: Schedule.max([Schedule.exponential(100), Schedule.recurs(8)]),
     }),
     Effect.catchTag("InvalidSubnetID.NotFound", () => Effect.void),
   );

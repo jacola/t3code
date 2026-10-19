@@ -51,7 +51,7 @@ export default Alchemy.Stack(
     // proxies PostHog Cloud for first-party browser analytics.
     const relay = yield* Ingester;
 
-    // const posthogProjectKey = yield* Config.string("POSTHOG_PROJECT_KEY")
+    // const posthogProjectKey = yield* Config.String("POSTHOG_PROJECT_KEY")
     //   .pipe(Config.option)
     //
     //   .pipe(Effect.orDie);
@@ -83,7 +83,7 @@ export default Alchemy.Stack(
     if (process.env.SYNC_GITHUB_SECRETS === "1") {
       yield* GitHub.Secrets({
         owner: "alchemy-run",
-        repository: "alchemy-effect",
+        repository: "alchemy",
         secrets: {
           AXIOM_DATASET_TRACES: traces.name,
           AXIOM_DATASET_LOGS: logs.name,

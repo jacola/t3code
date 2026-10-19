@@ -1,15 +1,32 @@
-import { useCallback, type ComponentType } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentType,
+  type KeyboardEvent,
+} from "react";
 import {
   ArchiveIcon,
-  ArrowLeftIcon,
+  BlocksIcon,
   BotIcon,
+  createLucideIcon,
+  CalendarClockIcon,
   GitBranchIcon,
+  HardDriveIcon,
+  PanelsTopLeftIcon,
   KeyboardIcon,
   Link2Icon,
+  PaletteIcon,
+  SearchIcon,
   Settings2Icon,
+  XIcon,
 } from "lucide-react";
-import { useCanGoBack, useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 
+import { Button } from "../ui/button";
+import { Kbd } from "../ui/kbd";
 import {
   SidebarContent,
   SidebarFooter,
@@ -17,109 +34,337 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarSeparator,
   useSidebar,
+  SidebarInput,
 } from "../ui/sidebar";
-import { T3ConnectSidebarAvatar, T3ConnectSidebarSignIn } from "../clerk/T3ConnectSidebarSignIn";
+import { SidebarUtilityMenu } from "../sidebar/SidebarChrome";
+import { scrollToSettingsTarget } from "./settingsLayout";
+import {
+  searchSettings,
+  isSettingsOverviewVisible,
+  SETTINGS_SECTION_LABELS,
+  type SettingsPath,
+  type SettingsSearchItem,
+} from "./settingsSearch";
+import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
+import { validateSettingsScopeSearch } from "./settingsScope";
 
-export type SettingsSectionPath =
-  | "/settings/general"
-  | "/settings/keybindings"
-  | "/settings/providers"
-  | "/settings/source-control"
-  | "/settings/connections"
-  | "/settings/archived";
+const SnapShotIcon = createLucideIcon("snap-shot", [
+  [
+    "path",
+    {
+      d: "M8 3H6a3 3 0 0 0-3 3v2M16 3h2a3 3 0 0 1 3 3v2M21 16v2a3 3 0 0 1-3 3h-2M8 21H6a3 3 0 0 1-3-3v-2",
+      key: "capture-frame",
+    },
+  ],
+  ["rect", { width: "10", height: "8", x: "7", y: "8", rx: "2", key: "window" }],
+  ["circle", { cx: "12", cy: "12", r: "1.5", key: "lens" }],
+]);
 
-export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
+const T3ConnectSidebarSignIn = lazy(() =>
+  import("../clerk/T3ConnectSidebarSignIn").then((module) => ({
+    default: module.T3ConnectSidebarSignIn,
+  })),
+);
+const T3ConnectSidebarAvatar = lazy(() =>
+  import("../clerk/T3ConnectSidebarSignIn").then((module) => ({
+    default: module.T3ConnectSidebarAvatar,
+  })),
+);
+
+const SETTINGS_SECTION_ICONS: Readonly<
+  Record<SettingsPath, ComponentType<{ className?: string }>>
+> = {
+  "/settings/general": Settings2Icon,
+  "/settings/diagnostics": Settings2Icon,
+  "/settings/appearance": PaletteIcon,
+  "/settings/projects": PanelsTopLeftIcon,
+  "/settings/keybindings": KeyboardIcon,
+  "/settings/snap-shot": SnapShotIcon,
+  "/settings/providers": BotIcon,
+  "/settings/integrations": BlocksIcon,
+  "/settings/scheduled-tasks": CalendarClockIcon,
+  "/settings/source-control": GitBranchIcon,
+  "/settings/storage": HardDriveIcon,
+  "/settings/connections": Link2Icon,
+  "/settings/archived": ArchiveIcon,
+};
+
+const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   label: string;
-  to: SettingsSectionPath;
+  to: SettingsPath;
   icon: ComponentType<{ className?: string }>;
-}> = [
-  { label: "General", to: "/settings/general", icon: Settings2Icon },
-  { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
-  { label: "Providers", to: "/settings/providers", icon: BotIcon },
-  { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
-  { label: "Connections", to: "/settings/connections", icon: Link2Icon },
-  { label: "Archive", to: "/settings/archived", icon: ArchiveIcon },
-];
+}> = (Object.keys(SETTINGS_SECTION_LABELS) as SettingsPath[])
+  .filter((to) => to !== "/settings/diagnostics")
+  .map((to) => ({
+    to,
+    label: SETTINGS_SECTION_LABELS[to],
+    icon: SETTINGS_SECTION_ICONS[to],
+  }));
+
+function SettingsSectionIcon({ to }: { to: SettingsPath }) {
+  const Icon = SETTINGS_SECTION_ICONS[to];
+  return <Icon className="mt-0.5 size-3.5 shrink-0 text-sidebar-muted-foreground/60" />;
+}
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const navigate = useNavigate();
-  const canGoBack = useCanGoBack();
-  const { isMobile, setOpenMobile } = useSidebar();
-  const handleSectionClick = useCallback(
-    (to: SettingsSectionPath) => {
-      if (isMobile) {
-        setOpenMobile(false);
-      }
-      void navigate({ to, replace: true });
-    },
-    [isMobile, navigate, setOpenMobile],
+  const currentHash = useLocation({ select: (location) => location.hash });
+  const currentSearch = useLocation({ select: (location) => location.search });
+  const scopeSearch = validateSettingsScopeSearch(currentSearch);
+  const navItems = SETTINGS_NAV_ITEMS.filter(
+    (item) => item.to !== "/settings/projects" || isSettingsOverviewVisible(scopeSearch),
   );
-  const handleBackClick = useCallback(() => {
+  const { isMobile, setOpenMobile, open, setOpen } = useSidebar();
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState("");
+  const [activeResultIndex, setActiveResultIndex] = useState(0);
+  const searchableItems = useAvailableSettingsSearchItems(scopeSearch);
+  const results = searchSettings(query, searchableItems);
+  const isSearching = query.trim().length > 0;
+  const hasResults = results.length > 0;
+  const maxResultIndex = Math.max(results.length - 1, 0);
+  // Persist the clamp so a shrink-then-recover of results keeps the clamped highlight.
+  if (activeResultIndex > maxResultIndex) {
+    setActiveResultIndex(maxResultIndex);
+  }
+
+  useEffect(() => {
+    const result = results[activeResultIndex];
+    if (!result) return;
+    document
+      .getElementById(`settings-search-result-${result.id}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeResultIndex, results]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      const isFindShortcut =
+        event.key.toLowerCase() === "f" &&
+        (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        !event.shiftKey;
+      const isSlashShortcut =
+        event.key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey;
+      if (!isFindShortcut && !isSlashShortcut) return;
+
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        ((isSlashShortcut &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.isContentEditable)) ||
+          target.closest(
+            '[role="dialog"], [aria-modal="true"], [data-slot$="popup"], [data-keybinding-capture]',
+          ) !== null)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      if (isMobile) {
+        setOpenMobile(true);
+      } else if (!open) {
+        setOpen(true);
+      }
+      requestAnimationFrame(() => {
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      });
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isMobile, open, setOpen, setOpenMobile]);
+
+  const handleSectionClick = (to: SettingsPath) => {
     if (isMobile) {
       setOpenMobile(false);
     }
-    if (canGoBack) {
-      window.history.back();
+    void navigate({
+      to,
+      hash: "",
+      replace: true,
+      hashScrollIntoView: false,
+    });
+  };
+
+  const clearSearch = () => {
+    setQuery("");
+    setActiveResultIndex(0);
+  };
+  const handleSearchResultClick = (item: SettingsSearchItem) => {
+    clearSearch();
+    if (isMobile) {
+      setOpenMobile(false);
+    }
+    const targetId = item.targetId ?? item.id;
+    if (pathname === item.to && currentHash.replace(/^#/, "") === targetId) {
+      scrollToSettingsTarget(targetId);
       return;
     }
-    void navigate({ to: "/" });
-  }, [canGoBack, isMobile, navigate, setOpenMobile]);
+    void navigate({
+      to: item.to,
+      hash: targetId,
+      replace: true,
+      hashScrollIntoView: false,
+      state: { settingsTargetHighlight: true },
+    });
+  };
+
+  const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape" && isSearching) {
+      event.preventDefault();
+      event.stopPropagation();
+      clearSearch();
+      return;
+    }
+    if (results.length === 0) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveResultIndex((activeResultIndex + 1) % results.length);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveResultIndex((activeResultIndex - 1 + results.length) % results.length);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const result = results[activeResultIndex];
+      if (result) handleSearchResultClick(result);
+    }
+  };
 
   return (
     <>
       <SidebarContent className="overflow-x-hidden">
-        <SidebarGroup className="px-2 py-3">
-          <SidebarMenu>
-            {SETTINGS_NAV_ITEMS.map((item) => {
-              const Icon = item.icon;
-              const isActive = pathname === item.to;
-              return (
-                <SidebarMenuItem key={item.to}>
-                  <SidebarMenuButton
-                    size="sm"
-                    isActive={isActive}
-                    className={
-                      isActive
-                        ? "gap-2.5 px-2.5 py-2 text-left text-[13px] font-medium text-foreground"
-                        : "gap-2.5 px-2.5 py-2 text-left text-[13px] text-muted-foreground/70 hover:text-foreground/80"
-                    }
-                    onClick={() => handleSectionClick(item.to)}
-                  >
-                    <Icon
-                      className={
-                        isActive
-                          ? "size-4 shrink-0 text-foreground"
-                          : "size-4 shrink-0 text-muted-foreground/60"
-                      }
-                    />
-                    <span className="truncate">{item.label}</span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              );
-            })}
-          </SidebarMenu>
+        <SidebarGroup>
+          <div className="flex flex-col gap-2">
+            <div className="flex h-8 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground">
+              <SearchIcon className="size-4 shrink-0 text-sidebar-muted-foreground/80" />
+              <SidebarInput
+                ref={searchInputRef}
+                nativeInput
+                type="search"
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.currentTarget.value);
+                  setActiveResultIndex(0);
+                }}
+                onKeyDown={handleSearchKeyDown}
+                placeholder="Search"
+                aria-label="Search settings"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded={isSearching && hasResults}
+                aria-controls={isSearching && hasResults ? "settings-search-results" : undefined}
+                aria-activedescendant={
+                  isSearching && results[activeResultIndex]
+                    ? `settings-search-result-${results[activeResultIndex].id}`
+                    : undefined
+                }
+                className="min-w-0 flex-1"
+              />
+              {isSearching ? (
+                <Button
+                  type="button"
+                  size="icon-micro"
+                  variant="ghost-muted"
+                  className="shrink-0"
+                  aria-label="Clear settings search"
+                  onClick={() => {
+                    clearSearch();
+                    searchInputRef.current?.focus();
+                  }}
+                >
+                  <XIcon className="size-3" />
+                </Button>
+              ) : (
+                <Kbd>/</Kbd>
+              )}
+            </div>
+            {isSearching && results.length === 0 ? (
+              <p
+                role="status"
+                className="px-2 py-6 text-center text-xs text-sidebar-muted-foreground"
+              >
+                No settings found
+              </p>
+            ) : null}
+            {isSearching ? (
+              <SidebarMenu
+                id={hasResults ? "settings-search-results" : undefined}
+                role={hasResults ? "listbox" : undefined}
+                aria-label={hasResults ? "Settings search results" : undefined}
+              >
+                {results.map((item, index) => (
+                  <SidebarMenuItem key={item.id} role="presentation">
+                    <SidebarMenuButton
+                      id={`settings-search-result-${item.id}`}
+                      role="option"
+                      aria-selected={index === activeResultIndex}
+                      tabIndex={-1}
+                      size="sm"
+                      isActive={index === activeResultIndex}
+                      className="h-auto min-h-10 items-start"
+                      onMouseMove={() => setActiveResultIndex(index)}
+                      onClick={() => handleSearchResultClick(item)}
+                    >
+                      <SettingsSectionIcon to={item.to} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium text-sidebar-foreground">
+                          {item.title}
+                        </span>
+                        <span className="block truncate text-2xs text-sidebar-muted-foreground/75">
+                          {SETTINGS_SECTION_LABELS[item.to]}
+                        </span>
+                      </span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            ) : (
+              <SidebarMenu>
+                {navItems.map((item) => {
+                  const Icon = item.icon;
+                  const isGeneralDetailPage =
+                    item.to === "/settings/general" &&
+                    pathname === "/settings/open-source-licenses";
+                  const isActive =
+                    isGeneralDetailPage ||
+                    pathname === item.to ||
+                    pathname.startsWith(`${item.to}/`);
+                  return (
+                    <SidebarMenuItem key={item.to}>
+                      <SidebarMenuButton
+                        isActive={isActive}
+                        onClick={() => handleSectionClick(item.to)}
+                      >
+                        <Icon />
+                        <span className="truncate">{item.label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
+              </SidebarMenu>
+            )}
+          </div>
         </SidebarGroup>
       </SidebarContent>
-
-      <SidebarSeparator />
-      <SidebarFooter className="p-2">
-        <T3ConnectSidebarSignIn />
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1">
-          <SidebarMenu className="min-w-0">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                size="sm"
-                className="gap-2 px-2 py-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
-                onClick={handleBackClick}
-              >
-                <ArrowLeftIcon className="size-4" />
-                <span>Back</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-          <T3ConnectSidebarAvatar />
+      <SidebarFooter>
+        <Suspense fallback={null}>
+          <T3ConnectSidebarSignIn />
+        </Suspense>
+        <div className="flex items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <SidebarUtilityMenu />
+          </div>
+          <Suspense fallback={null}>
+            <T3ConnectSidebarAvatar />
+          </Suspense>
         </div>
       </SidebarFooter>
     </>

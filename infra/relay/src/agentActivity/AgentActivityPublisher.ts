@@ -1,5 +1,9 @@
+import { makeAggregateState } from "./agentActivityAggregate.ts";
+export {
+  makeAggregateState,
+  TERMINAL_AGENT_ACTIVITY_DISPLAY_TTL_MS,
+} from "./agentActivityAggregate.ts";
 import type {
-  RelayAgentActivityAggregateState,
   RelayAgentActivityState,
   RelayDeliveryResult,
   RelayPublishResponse,
@@ -9,13 +13,17 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import { sanitizeAgentActivityAggregateState } from "./agentActivityPayloads.ts";
+import { isTerminalPhase } from "./agentActivityPayloads.ts";
+
+export { isExpiredAgentActivityState } from "./agentActivityPayloads.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as ApnsDeliveries from "./ApnsDeliveries.ts";
+import * as FcmDeliveries from "./FcmDeliveries.ts";
 
 export type AgentActivityPublishError =
+  | FcmDeliveries.FcmDeliveryError
   | AgentActivityRows.AgentActivityRowUpsertPersistenceError
   | AgentActivityRows.AgentActivityRowDeletePersistenceError
   | AgentActivityRows.AgentActivityRowListPersistenceError
@@ -44,17 +52,21 @@ export const make = Effect.gen(function* () {
   const links = yield* EnvironmentLinks.EnvironmentLinks;
   const liveActivities = yield* LiveActivities.LiveActivities;
   const apnsDeliveries = yield* ApnsDeliveries.ApnsDeliveries;
+  const fcmDeliveries = yield* FcmDeliveries.FcmDeliveries;
 
   const publishForDeliveryUser = Effect.fnUntraced(function* (input: {
     readonly deliveryUser: EnvironmentLinks.AgentAwarenessDeliveryUserRecord;
     readonly state: RelayAgentActivityState | null;
     readonly nowMs: number;
   }) {
-    const activeStates = yield* rows.listForUser({ userId: input.deliveryUser.userId });
+    const activeStates = input.deliveryUser.liveActivitiesEnabled
+      ? yield* rows.listForUser({ userId: input.deliveryUser.userId })
+      : [];
     const liveActivityAggregate = input.deliveryUser.liveActivitiesEnabled
       ? makeAggregateState({
           activeStates,
           terminalState: input.state && isTerminalPhase(input.state) ? input.state : null,
+          nowMs: input.nowMs,
         })
       : null;
     const notificationOnlyAggregate =
@@ -64,13 +76,17 @@ export const make = Effect.gen(function* () {
         ? makeAggregateState({
             activeStates: isTerminalPhase(input.state) ? [] : [input.state],
             terminalState: isTerminalPhase(input.state) ? input.state : null,
+            nowMs: input.nowMs,
           })
         : null;
     const targets = yield* liveActivities.listTargets({ userId: input.deliveryUser.userId });
     const deliveriesByTarget = yield* Effect.forEach(
       targets,
-      (target) =>
-        Effect.all(
+      Effect.fnUntraced(function* (target) {
+        if (target.platform === "android") {
+          return [yield* fcmDeliveries.enqueue({ target, state: input.state })];
+        }
+        return yield* Effect.all(
           [
             apnsDeliveries.sendForTarget({
               target,
@@ -85,7 +101,8 @@ export const make = Effect.gen(function* () {
                 }),
           ],
           { concurrency: 2 },
-        ),
+        );
+      }),
       { concurrency: 4 },
     );
     return deliveriesByTarget.flat();
@@ -110,12 +127,20 @@ export const make = Effect.gen(function* () {
       if (target === null) {
         return null;
       }
-      const aggregate = makeAggregateState({ activeStates, terminalState: null });
+      if (target.platform === "android") {
+        return yield* fcmDeliveries.enqueue({ target, state: null, replay: true });
+      }
       const now = yield* DateTime.now;
+      const aggregate = makeAggregateState({
+        activeStates,
+        terminalState: null,
+        nowMs: now.epochMilliseconds,
+      });
       return yield* apnsDeliveries.sendForTarget({
         target,
         aggregate,
         nowMs: now.epochMilliseconds,
+        replay: true,
       });
     }),
     publish: Effect.fn("relay.agent_activity_publisher.publish")(function* (input) {
@@ -124,7 +149,11 @@ export const make = Effect.gen(function* () {
         "relay.thread_id": input.threadId,
         "relay.agent_activity.phase": input.state?.phase ?? "deleted",
       });
-      if (input.state && !isTerminalPhase(input.state)) {
+      if (input.state) {
+        // Terminal states are persisted too (pruned by the cron after they
+        // age out) so a thread that finishes while other agents are active
+        // stays visible as Done/Failed in subsequent aggregates instead of
+        // silently vanishing from the Live Activity.
         yield* rows.upsert({
           environmentPublicKey: input.environmentPublicKey,
           state: input.state,
@@ -162,72 +191,5 @@ export const make = Effect.gen(function* () {
     }),
   });
 });
-
-function statusForPhase(phase: RelayAgentActivityState["phase"]): string {
-  switch (phase) {
-    case "waiting_for_approval":
-      return "Approval";
-    case "waiting_for_input":
-      return "Input";
-    case "completed":
-      return "Done";
-    case "failed":
-      return "Failed";
-    case "starting":
-      return "Starting";
-    case "running":
-      return "Working";
-    case "stale":
-      return "Waiting";
-  }
-}
-
-function isTerminalPhase(state: RelayAgentActivityState): boolean {
-  return state.phase === "completed" || state.phase === "failed";
-}
-
-function aggregateRowForState(state: RelayAgentActivityState) {
-  return {
-    environmentId: state.environmentId,
-    threadId: state.threadId,
-    projectTitle: state.projectTitle,
-    threadTitle: state.threadTitle,
-    modelTitle: state.modelTitle,
-    phase: state.phase,
-    status: statusForPhase(state.phase),
-    updatedAt: state.updatedAt,
-    deepLink: state.deepLink,
-  };
-}
-
-function terminalAggregateState(state: RelayAgentActivityState): RelayAgentActivityAggregateState {
-  return sanitizeAgentActivityAggregateState({
-    title: "T3 Code",
-    subtitle: state.phase === "failed" ? "Agent work failed" : "Agent work completed",
-    activeCount: 0,
-    updatedAt: state.updatedAt,
-    activities: [aggregateRowForState(state)],
-  });
-}
-
-function makeAggregateState(input: {
-  readonly activeStates: ReadonlyArray<RelayAgentActivityState>;
-  readonly terminalState: RelayAgentActivityState | null;
-}): RelayAgentActivityAggregateState | null {
-  const activeStates = input.activeStates.filter((state) => !isTerminalPhase(state));
-  if (activeStates.length === 0) {
-    return input.terminalState === null ? null : terminalAggregateState(input.terminalState);
-  }
-  const updatedAt = activeStates.reduce((latest, state) =>
-    state.updatedAt.localeCompare(latest.updatedAt) > 0 ? state : latest,
-  ).updatedAt;
-  return sanitizeAgentActivityAggregateState({
-    title: "T3 Code",
-    subtitle: "Agent work in progress",
-    activeCount: activeStates.length,
-    updatedAt,
-    activities: activeStates.slice(0, 3).map(aggregateRowForState),
-  });
-}
 
 export const layer = Layer.effect(AgentActivityPublisher, make);

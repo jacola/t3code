@@ -8,15 +8,15 @@ import type {
 } from "../AWS/S3/BucketNotifications.ts";
 import * as S3 from "../AWS/S3/index.ts";
 import type { S3EventType } from "../AWS/S3/S3Event.ts";
+import { normalizeBucketNotification } from "../AWS/S3/normalizeBucketNotification.ts";
 import * as SQS from "../AWS/SQS/index.ts";
-import * as Binding from "../Binding.ts";
 import { SQSQueueEventSource } from "./SQSQueueEventSource.ts";
 
+/** @binding */
 export const S3BucketEventSource = Layer.effect(
   S3.BucketEventSource,
   Effect.gen(function* () {
     const Queue = yield* SQS.Queue;
-    const bind = yield* S3BucketEventSourcePolicy;
 
     return Effect.fn(function* <
       Events extends S3EventType[],
@@ -31,51 +31,25 @@ export const S3BucketEventSource = Layer.effect(
     ) {
       const queue = yield* Queue(`${bucket.LogicalId}-BucketEvents`);
 
-      yield* bind(bucket, {
-        queue,
-        events: props.events,
-      });
-
-      yield* SQS.messages(queue).subscribe((stream) =>
-        stream.pipe(
-          Stream.flatMap((record) =>
-            Stream.fromArray((JSON.parse(record.body) as S3.S3Event).Records),
-          ),
-          Stream.map((event) => ({
-            type: event.eventName as S3.S3EventType,
-            bucket: event.s3.bucket.name,
-            key: event.s3.object.key,
-            size: event.s3.object.size,
-            eTag: event.s3.object.eTag,
-          })),
-          process,
-        ),
-      );
-    }) as S3.BucketEventSourceService;
-  }),
-).pipe(Layer.provideMerge(SQSQueueEventSource));
-
-export class S3BucketEventSourcePolicy extends Binding.Policy<
-  S3BucketEventSourcePolicy,
-  (
-    bucket: S3.Bucket,
-    props: {
-      queue: SQS.Queue;
-      events?: S3.S3EventType[];
-    },
-  ) => Effect.Effect<void>
->()("Process.S3BucketEventSource") {}
-
-export const S3BucketEventSourcePolicyLive =
-  /** @__PURE__ */
-  S3BucketEventSourcePolicy.layer.succeed(
-    (_ctx, bucket, { queue, events: Events = ["s3:ObjectCreated:*"] }) =>
-      Effect.all([
-        queue.bind(`AWS.SQS.SendMessage(${bucket.LogicalId})`, {
+      // Deploy-time: grant the bucket sqs:SendMessage on the queue and attach the
+      // bucket's notification config. Skipped once running inside the deployed
+      // Function (the global guard); the runtime only registers the consumer below.
+      if (!globalThis.__ALCHEMY_RUNTIME__) {
+        const events = props.events ?? ["s3:ObjectCreated:*"];
+        const filterRules = [
+          ...(props.prefix !== undefined
+            ? [{ Name: "prefix" as const, Value: props.prefix }]
+            : []),
+          ...(props.suffix !== undefined
+            ? [{ Name: "suffix" as const, Value: props.suffix }]
+            : []),
+        ];
+        yield* queue.bind(`AWS.SQS.SendMessage(${bucket.LogicalId})`, {
           policyStatements: [
             {
               Sid: `AllowS3EventsFrom${bucket.LogicalId}`,
               Effect: "Allow",
+              Principal: { Service: "s3.amazonaws.com" },
               Action: ["sqs:SendMessage"],
               Resource: [queue.queueArn],
               Condition: {
@@ -85,16 +59,39 @@ export const S3BucketEventSourcePolicyLive =
               },
             },
           ],
-        }),
-        bucket.bind(`AWS.S3.NotificationConfiguration(${queue.LogicalId})`, {
-          notificationConfiguration: {
-            QueueConfigurations: [
-              {
-                QueueArn: queue.queueArn,
-                Events,
-              },
-            ],
+        });
+        yield* bucket.bind(
+          `AWS.S3.NotificationConfiguration(${queue.LogicalId})`,
+          {
+            notificationConfiguration: {
+              QueueConfigurations: [
+                {
+                  QueueArn: queue.queueArn,
+                  Events: events,
+                  ...(filterRules.length > 0
+                    ? { Filter: { Key: { FilterRules: filterRules } } }
+                    : {}),
+                },
+              ],
+            },
           },
-        }),
-      ]),
-  );
+        );
+      }
+
+      yield* SQS.consumeQueueMessages(queue, (stream) =>
+        stream.pipe(
+          Stream.mapEffect((record) =>
+            Effect.sync(
+              () =>
+                (JSON.parse(record.body) as { Records?: S3.S3Record[] })
+                  .Records ?? [],
+            ),
+          ),
+          Stream.flatMap((records) => Stream.fromArray(records)),
+          Stream.mapEffect(normalizeBucketNotification),
+          process,
+        ),
+      );
+    }) as S3.BucketEventSourceService;
+  }),
+).pipe(Layer.provideMerge(SQSQueueEventSource));

@@ -1,65 +1,103 @@
+import { Toolbar } from "../../components/ui/Toolbar";
+import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useAuth, useUser } from "@clerk/expo";
-import * as Notifications from "expo-notifications";
 import { useNavigation } from "@react-navigation/native";
-import { NativeStackScreenOptions } from "../../native/StackHeader";
-import { SymbolView } from "expo-symbols";
-import * as Effect from "effect/Effect";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Linking, Platform, ScrollView, View } from "react-native";
+import { Platform, View } from "react-native";
+import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import {
-  isAtomCommandInterrupted,
-  reportAtomCommandResult,
-  settleAsyncResult,
-  settlePromise,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import { AppText as Text } from "../../components/AppText";
-import { setLiveActivityUpdatesEnabled } from "../agent-awareness/liveActivityPreferences";
-import { requestAgentNotificationPermission } from "../agent-awareness/notificationPermissions";
-import { refreshAgentAwarenessRegistration } from "../agent-awareness/remoteRegistration";
-import { refreshManagedRelayEnvironments } from "../cloud/managedRelayState";
-import { useClerkSettingsSheetDetent } from "../cloud/ClerkSettingsSheetDetent";
-import { hasCloudPublicConfig, resolveRelayClerkTokenOptions } from "../cloud/publicConfig";
-import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
-import { WorkspaceSidebarToolbar } from "../layout/workspace-sidebar-toolbar";
-import { runtime } from "../../lib/runtime";
-import { loadPreferences } from "../../lib/storage";
-import { useThemeColor } from "../../lib/useThemeColor";
+import { hasCloudPublicConfig } from "../cloud/publicConfig";
+import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
+import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
-import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
-
-type NotificationStatus = "checking" | "enabled" | "disabled" | "unsupported";
-type LiveActivityStatus = "checking" | "enabled" | "disabled" | "signed-out" | "linking";
+import { SettingsScreen } from "./components/SettingsScreen";
+import {
+  AndroidSettingsEnvironmentFilter,
+  SettingsEnvironmentFilterHeader,
+} from "./components/SettingsEnvironmentFilterHeader";
+import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 
 export function SettingsRouteScreen() {
   const navigation = useNavigation();
+  const { layout } = useAdaptiveWorkspaceLayout();
+  const content = hasCloudPublicConfig() ? (
+    <ConfiguredSettingsRouteScreen />
+  ) : (
+    <LocalSettingsRouteScreen />
+  );
 
   return (
     <>
-      <WorkspaceSidebarToolbar />
-      <NativeStackScreenOptions
-        options={{
-          unstable_headerRightItems:
-            Platform.OS === "ios"
-              ? () => [
-                  withNativeGlassHeaderItem({
-                    accessibilityLabel: "Close settings",
-                    icon: { name: "xmark", type: "sfSymbol" } as const,
-                    identifier: "settings-close",
-                    label: "",
-                    onPress: () => navigation.goBack(),
-                    type: "button",
-                  }),
-                ]
-              : undefined,
-        }}
-      />
-      {hasCloudPublicConfig() ? <ConfiguredSettingsRouteScreen /> : <LocalSettingsRouteScreen />}
+      {Platform.OS === "ios" ? (
+        <NativeStackScreenOptions options={{ headerBackVisible: !layout.usesSplitView }} />
+      ) : null}
+      {Platform.OS === "ios" && layout.usesSplitView ? (
+        <>
+          <Toolbar placement="left">
+            <Toolbar.Button
+              accessibilityLabel="Go back"
+              icon="chevron.left"
+              onPress={() => navigation.goBack()}
+            />
+          </Toolbar>
+        </>
+      ) : null}
+      <SettingsEnvironmentFilterHeader closeSettings />
+      {Platform.OS === "android" ? (
+        <SettingsScreen title="Settings" trailing={<AndroidSettingsEnvironmentFilter />}>
+          {content}
+        </SettingsScreen>
+      ) : (
+        content
+      )}
     </>
+  );
+}
+
+function ConfiguredSettingsRouteScreen() {
+  const insets = useSafeAreaInsets();
+  const navigation = useNavigation();
+  const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
+  const { user } = useUser();
+  const { savedConnectionsById } = useSavedRemoteConnections();
+  const accountLabel = !isLoaded
+    ? "Checking"
+    : !isSignedIn
+      ? "Sign in"
+      : (user?.primaryEmailAddress?.emailAddress ?? "Signed in");
+
+  return (
+    <View collapsable={false} className="flex-1 bg-sheet">
+      <ScrollView
+        contentInsetAdjustmentBehavior="automatic"
+        showsVerticalScrollIndicator={false}
+        className="flex-1"
+        contentContainerClassName="gap-4 px-5 pt-4"
+        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
+      >
+        <SettingsSection title="Connections">
+          <SettingsRow
+            icon="person.crop.circle"
+            label="T3 Account"
+            value={accountLabel}
+            disabled={!isLoaded}
+            onPress={() => navigation.navigate("SettingsSheet", { screen: "SettingsAuth" })}
+          />
+          <SettingsRow
+            icon="desktopcomputer"
+            label="Environments"
+            value={`${Object.keys(savedConnectionsById).length}`}
+            valuePosition="trailing"
+            target="SettingsEnvironments"
+          />
+          <SettingsRow icon="bell.badge" label="Notifications" target="SettingsNotifications" />
+        </SettingsSection>
+
+        <SettingsIndexSections />
+      </ScrollView>
+    </View>
   );
 }
 
@@ -73,376 +111,113 @@ function LocalSettingsRouteScreen() {
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"
         showsVerticalScrollIndicator={false}
-        style={{ flex: 1 }}
+        className="flex-1"
+        contentContainerClassName="gap-4 px-5 pt-4"
         contentContainerStyle={{
-          gap: 24,
           paddingBottom: Math.max(insets.bottom, 18) + 18,
-          paddingHorizontal: 20,
-          paddingTop: 16,
         }}
       >
-        <SettingsSection title="Configuration">
+        <SettingsSection title="Connections">
           <SettingsRow
             icon="desktopcomputer"
             label="Environments"
             value={`${environmentCount}`}
+            valuePosition="trailing"
             target="SettingsEnvironments"
           />
         </SettingsSection>
 
-        <SettingsSection title="Appearance">
-          <SettingsRow icon="paintbrush" label="Appearance" target="SettingsAppearance" />
-        </SettingsSection>
-
-        <ArchivedThreadsSettingsSection />
-
-        <AppSettingsSection />
+        <SettingsIndexSections />
       </ScrollView>
     </View>
   );
 }
 
-function ConfiguredSettingsRouteScreen() {
-  const insets = useSafeAreaInsets();
-  const navigation = useNavigation();
-  const { expand: expandClerkSheet } = useClerkSettingsSheetDetent();
-  const { getToken, isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
-  const { user } = useUser();
-  const { savedConnectionsById } = useSavedRemoteConnections();
-  const [notificationStatus, setNotificationStatus] = useState<NotificationStatus>("checking");
-  const [liveActivityStatus, setLiveActivityStatus] = useState<LiveActivityStatus>("checking");
-
-  const connections = useMemo(() => Object.values(savedConnectionsById), [savedConnectionsById]);
-  const environmentCount = connections.length;
-  const accountLabel = useMemo(() => {
-    if (!isLoaded) return "Checking";
-    if (!isSignedIn) return "Request access";
-    return user?.primaryEmailAddress?.emailAddress ?? "Signed in";
-  }, [isLoaded, isSignedIn, user?.primaryEmailAddress?.emailAddress]);
-
-  const refreshNotifications = useCallback(async () => {
-    if (process.env.EXPO_OS !== "ios") {
-      setNotificationStatus("unsupported");
-      return;
-    }
-    const result = await settlePromise(() => Notifications.getPermissionsAsync());
-    if (result._tag === "Failure") {
-      reportAtomCommandResult(result, { label: "notification permission refresh" });
-      setNotificationStatus("disabled");
-      return;
-    }
-    setNotificationStatus(result.value.granted ? "enabled" : "disabled");
-  }, []);
-
-  useEffect(() => {
-    void refreshNotifications();
-  }, [refreshNotifications]);
-
-  useEffect(() => {
-    if (!isLoaded) {
-      setLiveActivityStatus("checking");
-      return;
-    }
-    if (!isSignedIn) {
-      setLiveActivityStatus("signed-out");
-      return;
-    }
-    void (async () => {
-      const result = await settlePromise(() => loadPreferences());
-      if (result._tag === "Failure") {
-        reportAtomCommandResult(result, { label: "live activity preference load" });
-        setLiveActivityStatus("enabled");
-        return;
-      }
-      setLiveActivityStatus(result.value.liveActivitiesEnabled === false ? "disabled" : "enabled");
-    })();
-  }, [isLoaded, isSignedIn]);
-
-  const requestNotifications = useCallback(async () => {
-    const result = await settleAsyncResult(() =>
-      runtime.runPromiseExit(
-        requestAgentNotificationPermission.pipe(
-          Effect.tap((permission) =>
-            permission.type === "granted" ? refreshAgentAwarenessRegistration() : Effect.void,
-          ),
-        ),
-      ),
-    );
-    if (result._tag === "Failure") {
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        Alert.alert(
-          "Notifications unavailable",
-          error instanceof Error ? error.message : "Could not request notification permission.",
-        );
-      }
-      return;
-    }
-    if (result.value.type === "granted") {
-      setNotificationStatus("enabled");
-      Alert.alert(
-        "Notifications enabled",
-        "Live Activity notifications are enabled for this device.",
-      );
-      return;
-    }
-    if (result.value.type === "unsupported") {
-      setNotificationStatus("unsupported");
-      Alert.alert(
-        "Notifications unavailable",
-        "Live Activity notifications are only available on iOS.",
-      );
-      return;
-    }
-    setNotificationStatus("disabled");
-    if (result.value.canAskAgain) {
-      Alert.alert("Notifications disabled", "Notifications were not enabled.");
-      return;
-    }
-    Alert.alert(
-      "Notifications disabled",
-      "Notifications were denied for this app. Open Settings to enable them.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { text: "Open Settings", onPress: () => void Linking.openSettings() },
-      ],
-    );
-  }, []);
-
-  const promptSignIn = useCallback(() => {
-    Alert.alert(
-      "Request T3 Cloud access",
-      "Live Activity updates require approved T3 Cloud access so relay can deliver updates to this device.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Continue",
-          onPress: () => navigation.navigate("SettingsSheet", { screen: "SettingsWaitlist" }),
-        },
-      ],
-    );
-  }, [navigation]);
-
-  const linkEnvironments = useCallback(async () => {
-    if (!isSignedIn) {
-      promptSignIn();
-      return;
-    }
-
-    setLiveActivityStatus("linking");
-    const tokenResult = await settlePromise(() => getToken(resolveRelayClerkTokenOptions()));
-    if (tokenResult._tag === "Failure") {
-      setLiveActivityStatus("disabled");
-      const error = squashAtomCommandFailure(tokenResult);
-      Alert.alert(
-        "Live Activities unavailable",
-        error instanceof Error ? error.message : "Could not enable Live Activity updates.",
-      );
-      return;
-    }
-    if (!tokenResult.value) {
-      promptSignIn();
-      setLiveActivityStatus("signed-out");
-      return;
-    }
-
-    const updateResult = await settleAsyncResult(() =>
-      runtime.runPromiseExit(
-        setLiveActivityUpdatesEnabled({
-          enabled: true,
-          clerkToken: tokenResult.value,
-          connections,
-        }),
-      ),
-    );
-    if (updateResult._tag === "Failure") {
-      setLiveActivityStatus("disabled");
-      if (!isAtomCommandInterrupted(updateResult)) {
-        const error = squashAtomCommandFailure(updateResult);
-        Alert.alert(
-          "Live Activities unavailable",
-          error instanceof Error ? error.message : "Could not enable Live Activity updates.",
-        );
-      }
-      return;
-    }
-
-    refreshManagedRelayEnvironments();
-    setLiveActivityStatus("enabled");
-    Alert.alert(
-      "Live Activities enabled",
-      environmentCount > 0
-        ? `${environmentCount} environment${environmentCount === 1 ? "" : "s"} linked for Live Activity updates.`
-        : "Live Activity updates are enabled. Add an environment to start receiving updates.",
-    );
-  }, [connections, environmentCount, getToken, isSignedIn, promptSignIn]);
-
-  const handleDeviceNotificationsChange = useCallback(
-    (enabled: boolean) => {
-      if (enabled) {
-        void requestNotifications();
-        return;
-      }
-
-      Alert.alert(
-        "Disable notifications",
-        "Notification permission is controlled by iOS. Open Settings to disable notifications for T3 Code.",
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Open Settings", onPress: () => void Linking.openSettings() },
-        ],
-      );
-    },
-    [requestNotifications],
-  );
-
-  const handleLiveActivitiesChange = useCallback(
-    (enabled: boolean) => {
-      if (!enabled) {
-        setLiveActivityStatus("disabled");
-        void (async () => {
-          let token: string | null = null;
-          if (isSignedIn) {
-            const tokenResult = await settlePromise(() =>
-              getToken(resolveRelayClerkTokenOptions()),
-            );
-            if (tokenResult._tag === "Failure") {
-              reportAtomCommandResult(tokenResult, {
-                label: "live activity disable token lookup",
-              });
-              return;
-            }
-            token = tokenResult.value;
-          }
-
-          const updateResult = await settleAsyncResult(() =>
-            runtime.runPromiseExit(
-              setLiveActivityUpdatesEnabled({
-                enabled: false,
-                clerkToken: token,
-                connections,
-              }),
-            ),
-          );
-          if (updateResult._tag === "Failure") {
-            reportAtomCommandResult(updateResult, {
-              label: "live activity disable",
-            });
-            return;
-          }
-          refreshManagedRelayEnvironments();
-        })();
-        return;
-      }
-
-      if (!isSignedIn) {
-        promptSignIn();
-        return;
-      }
-
-      void linkEnvironments();
-    },
-    [connections, getToken, isSignedIn, linkEnvironments, promptSignIn],
-  );
-
-  const openAccount = useCallback(() => {
-    if (!isLoaded) return;
-    if (!isSignedIn) {
-      navigation.navigate("SettingsSheet", { screen: "SettingsWaitlist" });
-      return;
-    }
-    expandClerkSheet();
-    navigation.navigate("SettingsSheet", { screen: "SettingsAuth" });
-  }, [expandClerkSheet, isLoaded, isSignedIn, navigation]);
-
+function SettingsIndexSections() {
+  const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
+  const noServerTargets = selectedTargets.length === 0;
+  const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
+  const scopedProjectMembers =
+    selectedProject?.members
+      .map((member) => member.project)
+      .filter((project) =>
+        selectedTargets.some((target) => target.environmentId === project.environmentId),
+      ) ?? [];
+  const projectLabel =
+    scopedProjectMembers.length > 0
+      ? deriveProjectGroupLabel({
+          representative: scopedProjectMembers[0]!,
+          members: scopedProjectMembers,
+        })
+      : (selectedProject?.label ?? "Unavailable project");
   return (
-    <View collapsable={false} className="flex-1 bg-sheet">
-      <ScrollView
-        contentInsetAdjustmentBehavior="automatic"
-        showsVerticalScrollIndicator={false}
-        style={{ flex: 1 }}
-        contentContainerStyle={{
-          gap: 24,
-          paddingBottom: Math.max(insets.bottom, 18) + 18,
-          paddingHorizontal: 20,
-          paddingTop: 16,
-        }}
-      >
-        <View className="gap-3">
-          <SettingsSection title="Account">
-            <SettingsRow
-              icon="person.crop.circle"
-              label="T3 Account"
-              value={accountLabel}
-              onPress={openAccount}
-            />
-          </SettingsSection>
-          <Text className="px-2 text-sm text-foreground-muted">
-            T3 Code works locally without signing in. Cloud features are optional.
-          </Text>
-        </View>
+    <>
+      <SettingsSection title="Interface">
+        <SettingsRow icon="paintbrush" label="Appearance" target="SettingsAppearance" />
+        {Platform.OS === "ios" ? (
+          <>
+            <SettingsRow icon="keyboard" label="Keyboard" target="SettingsKeyboard" />
+            <SettingsRow icon="mic" label="Microphone" target="SettingsMicrophone" />
+          </>
+        ) : null}
+      </SettingsSection>
 
-        <SettingsSection title="Configuration">
+      <SettingsSection title="Automations">
+        <SettingsRow icon="clock" label="Scheduled tasks" target="SettingsScheduledTasks" />
+      </SettingsSection>
+
+      <SettingsSection title="Projects & threads">
+        {selectedProjectKey !== null ? (
           <SettingsRow
-            icon="desktopcomputer"
-            label="Environments"
-            value={`${environmentCount}`}
-            target="SettingsEnvironments"
+            icon="folder"
+            label="Overview"
+            value={projectLabel}
+            target="SettingsProjectOverview"
           />
-          <SettingsSwitchRow
-            icon="bell.badge"
-            label="Device Notifications"
-            disabled={notificationStatus === "checking" || notificationStatus === "unsupported"}
-            value={notificationStatus === "enabled"}
-            onValueChange={handleDeviceNotificationsChange}
-          />
-          <SettingsSwitchRow
-            disabled={
-              !isLoaded || liveActivityStatus === "checking" || liveActivityStatus === "linking"
-            }
-            icon="bolt.circle"
-            label="Live Activity Updates"
-            value={liveActivityStatus === "enabled" || liveActivityStatus === "linking"}
-            onValueChange={handleLiveActivitiesChange}
-          />
-        </SettingsSection>
+        ) : null}
+        <SettingsRow icon="folder" label="Organization" target="SettingsOrganization" />
+        <SettingsRow icon="text.bubble" label="Thread behavior" target="SettingsThreads" />
+        <SettingsRow icon="arrow.turn.left.up" label="Follow-ups" target="SettingsFollowUp" />
+        <SettingsRow icon="archivebox" label="Archived Threads" target="SettingsArchive" />
+      </SettingsSection>
 
-        <SettingsSection title="Appearance">
-          <SettingsRow icon="paintbrush" label="Appearance" target="SettingsAppearance" />
-        </SettingsSection>
-
-        <ArchivedThreadsSettingsSection />
-
-        <AppSettingsSection />
-      </ScrollView>
-    </View>
-  );
-}
-
-function AppSettingsSection() {
-  const icon = useThemeColor("--color-icon");
-
-  return (
-    <SettingsSection title="App">
-      <View className="flex-row items-center gap-4 p-4">
-        <SymbolView
-          name="info.circle"
-          size={22}
-          tintColor={icon}
-          type="monochrome"
-          weight="regular"
+      <SettingsSection title="Server settings">
+        <SettingsRow
+          icon="person.crop.circle"
+          label="Provider accounts"
+          target="SettingsProviderAccounts"
+          disabled={noServerTargets}
         />
-        <Text className="flex-1 text-lg text-foreground">Version</Text>
-        <Text className="text-lg text-foreground-muted">Alpha</Text>
-      </View>
-    </SettingsSection>
-  );
-}
+        <SettingsRow
+          icon="text.bubble"
+          label="New threads"
+          target="SettingsEnvironmentNewThreads"
+          disabled={noServerTargets}
+        />
+        <SettingsRow
+          icon="arrow.triangle.branch"
+          label="Source control"
+          target="SettingsEnvironmentSourceControl"
+          disabled={noServerTargets}
+        />
+        <SettingsRow
+          icon="text.alignleft"
+          label="Agent behavior"
+          target="SettingsEnvironmentAgentBehavior"
+          disabled={noServerTargets}
+        />
+        <SettingsRow
+          icon="arrow.clockwise"
+          label="Maintenance"
+          target="SettingsEnvironmentMaintenance"
+          disabled={noServerTargets}
+        />
+      </SettingsSection>
 
-function ArchivedThreadsSettingsSection() {
-  return (
-    <SettingsSection title="Threads">
-      <SettingsRow icon="archivebox" label="Archived Threads" target="SettingsArchive" />
-    </SettingsSection>
+      <SettingsSection title="App">
+        <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
+        <SettingsRow icon="info.circle" label="About T3 Code" target="SettingsAbout" />
+      </SettingsSection>
+    </>
   );
 }

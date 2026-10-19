@@ -1,9 +1,9 @@
-import * as Cloudflare from "alchemy/Cloudflare";
+import * as Cloudflare from "@/Cloudflare";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
-import * as RpcServer from "effect/unstable/rpc/RpcServer";
+import * as RpcSerialization from "effect/rpc/RpcSerialization";
+import * as RpcServer from "effect/rpc/RpcServer";
 import { DoRpcs } from "./group.ts";
 
 /**
@@ -12,10 +12,10 @@ import { DoRpcs } from "./group.ts";
  * an `RpcClient` whose transport calls into this DO's `fetch`, so the
  * Worker's `*DO` handlers transparently delegate here.
  */
-export default class RpcHttpTestObject extends Cloudflare.DurableObjectNamespace<RpcHttpTestObject>()(
+export default class RpcHttpTestObject extends Cloudflare.DurableObject<RpcHttpTestObject>()(
   "RpcHttpTestObject",
-  Effect.gen(function* () {
-    return Effect.gen(function* () {
+  Effect.succeed(
+    Effect.gen(function* () {
       let counter = 0;
 
       const handlersLayer = DoRpcs.toLayer({
@@ -58,6 +58,6 @@ export default class RpcHttpTestObject extends Cloudflare.DurableObjectNamespace
           ),
         ),
       };
-    });
-  }),
+    }),
+  ),
 ) {}

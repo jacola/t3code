@@ -1,11 +1,11 @@
 import * as Alchemy from "@/index.ts";
 import * as Cloudflare from "@/Cloudflare";
-import * as Test from "@/Test/Vitest";
-import { expect } from "@effect/vitest";
+import * as Test from "@/Test/Alchemy";
+import { expect } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import { MinimumLogLevel } from "effect/References";
 import * as Schedule from "effect/Schedule";
-import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClient from "effect/http/HttpClient";
 import SendEmailWorker from "./fixtures/worker.ts";
 
 const { test, beforeAll, afterAll, deploy, destroy } = Test.make({
@@ -36,6 +36,9 @@ const Stack = Alchemy.Stack(
 const stack = beforeAll(deploy(Stack));
 afterAll.skipIf(!!process.env.NO_DESTROY || skip)(destroy(Stack));
 
+// The send_email binding only delivers from a domain with Email Routing
+// enabled to a verified destination address — supply such a pair via
+// CLOUDFLARE_TEST_EMAIL_FROM / CLOUDFLARE_TEST_EMAIL_TO to run this test.
 test.skipIf(skip)(
   "sends an email through the Worker send_email binding",
   Effect.gen(function* () {
@@ -58,5 +61,13 @@ test.skipIf(skip)(
     }
     expect(body.ok).toBe(true);
   }).pipe(logLevel),
-  { timeout: 180_000 },
+  {
+    tags: [
+      "provider:cloudflare",
+      "provider:cloudflare:email",
+      "provider:cloudflare:worker",
+      "live",
+    ],
+    timeout: 180_000,
+  },
 );

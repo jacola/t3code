@@ -34,8 +34,8 @@ const IMPLS: Impl[] = [
   {
     layer: "SessionsKV",
     resourceLabel: "Sessions",
-    resourceSub: "Cloudflare.KVNamespace",
-    bindCall: "KVNamespace.bind",
+    resourceSub: "Cloudflare.KV.Namespace",
+    bindCall: "KV.ReadWriteNamespace",
     color: CF_COLOR,
     kind: "kv",
   },
@@ -43,14 +43,14 @@ const IMPLS: Impl[] = [
     layer: "SessionsDynamoDB",
     resourceLabel: "Sessions",
     resourceSub: "AWS.DynamoDB.Table",
-    bindCall: "DynamoDB.PutItem.bind",
+    bindCall: "DynamoDB.PutItem",
     color: AWS_COLOR,
     kind: "ddb",
   },
   {
     layer: "SessionsD1",
     resourceLabel: "Sessions",
-    resourceSub: "Cloudflare.D1Database",
+    resourceSub: "Cloudflare.D1.Database",
     bindCall: "D1Database.bind",
     color: D1_COLOR,
     kind: "d1",
@@ -182,7 +182,7 @@ export default function ServiceLayerSwap() {
   const active = IMPLS[idx]!;
 
   return (
-    <div ref={wrapRef} className="service-swap-grid">
+    <div ref={wrapRef} className="service-swap-grid" data-nosnippet="">
       {/* LEFT — code: Worker that consumes Sessions, Layer name swaps */}
       <div className="alc-code-block">
         <div className="alc-code-block__header">

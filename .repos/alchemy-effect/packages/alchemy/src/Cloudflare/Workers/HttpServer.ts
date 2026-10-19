@@ -3,13 +3,13 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Scope from "effect/Scope";
-import * as EffectHttp from "effect/unstable/http/HttpEffect";
-import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import * as EffectHttp from "effect/http/HttpEffect";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as Http from "../../Http.ts";
 import { Request } from "./Request.ts";
-import { isWorkerEvent, type WorkerServices } from "./Worker.ts";
+import type { WorkerServices } from "./Worker.ts";
+import { isWorkerEvent } from "./WorkerRuntime.ts";
 
 export type HttpEffect = Http.HttpEffect<WorkerServices>;
 
@@ -74,6 +74,4 @@ const toHandledWebResponse = <Req>(
     return yield* Deferred.await(webResponse);
   });
 
-const scopeEjected = Symbol.for("effect/http/HttpEffect/scopeEjected");
-
-export const isScopeEjected = (scope: Scope.Scope) => scopeEjected in scope;
+export { isScopeEjected } from "../../Http.ts";

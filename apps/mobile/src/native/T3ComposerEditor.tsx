@@ -1,8 +1,8 @@
 import { TextInputWrapper } from "expo-paste-input";
 import { useImperativeHandle, useRef } from "react";
-import { TextInput, type TextInput as RNTextInput } from "react-native";
+import { TextInput, type TextInputInstance } from "react-native";
 
-import { useThemeColor } from "../lib/useThemeColor";
+import { FONT_FAMILIES } from "../lib/fontFamilies";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 import { useNativePaste } from "../lib/useNativePaste";
 import type { ComposerEditorProps } from "./T3ComposerEditor.types";
@@ -12,15 +12,18 @@ export function ComposerEditor({
   skills: _skills,
   selection,
   onPasteImages,
+  onPasteText: _onPasteText,
   style,
   textStyle,
   contentInsetVertical = 0,
+  singleLineCentered: _singleLineCentered,
+  enterBehavior: _enterBehavior,
+  readOnly = false,
   ...props
 }: ComposerEditorProps) {
-  const inputRef = useRef<RNTextInput>(null);
+  const inputRef = useRef<TextInputInstance>(null);
   const bodyText = useScaledTextRole("body");
-  const foregroundColor = useThemeColor("--color-foreground");
-  const placeholderColor = useThemeColor("--color-placeholder");
+  const fontFamily = FONT_FAMILIES.regular;
   const handlePaste = useNativePaste((uris) => onPasteImages?.(uris));
 
   useImperativeHandle(
@@ -39,16 +42,17 @@ export function ComposerEditor({
       <TextInput
         ref={inputRef}
         {...props}
+        editable={(props.editable ?? true) && !readOnly}
         selection={selection}
         onSelectionChange={(event) => props.onSelectionChange?.(event.nativeEvent.selection)}
         multiline={props.multiline ?? true}
-        placeholderTextColor={placeholderColor}
+        placeholderTextColorClassName={"accent-placeholder"}
+        className="text-foreground"
         style={[
           {
             flex: 1,
             minHeight: 0,
-            color: foregroundColor,
-            fontFamily: "DMSans_400Regular",
+            fontFamily,
             ...bodyText,
             paddingVertical: contentInsetVertical,
           },
@@ -63,4 +67,5 @@ export type {
   ComposerEditorHandle,
   ComposerEditorProps,
   ComposerEditorSelection,
+  ComposerTextPaste,
 } from "./T3ComposerEditor.types";

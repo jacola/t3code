@@ -2,11 +2,11 @@ import {
   makeServerRpcSession,
   type ServerWebSocketLike,
 } from "@/Local/RpcServerSession.ts";
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it } from "alchemy-test";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 
-describe("Local.RpcServerSession", () => {
+describe("Local.RpcServerSession", { tags: ["unit", "local"] }, () => {
   it.effect("happy path: paired sessions round-trip a method call", () =>
     Effect.gen(function* () {
       const mainA = { ping: async (x: number) => x + 1 };

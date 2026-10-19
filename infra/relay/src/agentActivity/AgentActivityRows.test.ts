@@ -19,6 +19,42 @@ const state: RelayAgentActivityState = {
 };
 
 describe("AgentActivityRows", () => {
+  it.effect("validates database JSON objects and ignores invalid activity rows", () => {
+    const queryRows = [
+      { stateJson: null },
+      { stateJson: JSON.stringify(state) },
+      { stateJson: { ...state, phase: "invalid" } },
+      { stateJson: { ...state, unrelated: "ignored" } },
+    ];
+    const db = {
+      select: () => ({
+        from: () => ({
+          innerJoin: () => ({
+            where: () => ({
+              orderBy: () => Effect.succeed(queryRows),
+            }),
+          }),
+        }),
+      }),
+    } as unknown as RelayDb.RelayDb["Service"];
+
+    return Effect.gen(function* () {
+      const rows = yield* AgentActivityRows.AgentActivityRows;
+      expect(yield* rows.listForUser({ userId: "user-2" })).toEqual([state]);
+      expect(
+        yield* rows.getForUserThread({
+          userId: "user-2",
+          environmentId: "env-1",
+          threadId: "thread-1",
+        }),
+      ).toEqual(state);
+    }).pipe(
+      Effect.provide(
+        AgentActivityRows.layer.pipe(Layer.provide(Layer.succeed(RelayDb.RelayDb, db))),
+      ),
+    );
+  });
+
   it.effect("preserves activity context on persistence failures", () => {
     const cause = new Error("database unavailable");
     const failingDb = {
@@ -75,6 +111,15 @@ describe("AgentActivityRows", () => {
       const listError = yield* rows.listForUser({ userId: "user-2" }).pipe(Effect.flip);
       expect(listError).toMatchObject({ userId: "user-2", cause });
       expect(listError.message).toBe("Failed to list agent activity state for user user-2.");
+
+      const getError = yield* rows
+        .getForUserThread({
+          userId: "user-2",
+          environmentId: "env-1",
+          threadId: "thread-1",
+        })
+        .pipe(Effect.flip);
+      expect(getError).toMatchObject({ userId: "user-2", cause });
     }).pipe(
       Effect.provide(
         AgentActivityRows.layer.pipe(Layer.provide(Layer.succeed(RelayDb.RelayDb, failingDb))),

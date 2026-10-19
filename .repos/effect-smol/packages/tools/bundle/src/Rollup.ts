@@ -20,7 +20,6 @@ import * as NodeStream from "@effect/platform-node/NodeStream"
 import * as Context from "effect/Context"
 import * as Data from "effect/Data"
 import * as Effect from "effect/Effect"
-import * as FiberSet from "effect/FiberSet"
 import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
 import * as Path from "effect/Path"
@@ -28,7 +27,7 @@ import * as Stream from "effect/Stream"
 import { createGzip } from "node:zlib"
 import type { RollupOptions } from "rollup"
 import { rollup } from "rollup"
-import { createPlugins } from "./Plugins.ts"
+import { createPlugins, type VisualizationOutput } from "./Plugins.ts"
 
 /**
  * Error raised when Rollup bundling, output generation, or bundle size measurement fails.
@@ -54,7 +53,7 @@ export class BundleStats extends Data.TaggedClass("BundleStats")<{
 /**
  * Options for bundling one entry file, optionally writing a minified output and generating a visualization.
  *
- * @category models
+ * @category options
  * @since 4.0.0
  */
 export interface BundleOptions {
@@ -66,7 +65,7 @@ export interface BundleOptions {
 /**
  * Options for bundling multiple entry files with shared visualization and output-directory settings.
  *
- * @category models
+ * @category options
  * @since 4.0.0
  */
 export interface BundleAllOptions {
@@ -88,12 +87,34 @@ export class Rollup extends Context.Service<Rollup>()(
       const pathService = yield* Path.Path
       const fs = yield* FileSystem.FileSystem
 
+      const createVisualizationOutputs = (options: BundleOptions): ReadonlyArray<VisualizationOutput> => {
+        if (!options.visualize || !options.outputDirectory) {
+          return []
+        }
+        const name = pathService.parse(options.path).name
+        return [
+          {
+            filename: pathService.join(options.outputDirectory, `${name}.treemap.html`),
+            template: "treemap",
+            title: `${name} bundle treemap`
+          },
+          {
+            filename: pathService.join(options.outputDirectory, `${name}.raw-data.json`),
+            template: "raw-data",
+            title: `${name} bundle raw data`
+          }
+        ]
+      }
+
       const getRollupOptions = (options: BundleOptions): RollupOptions => ({
         input: options.path,
         output: {
           format: "esm"
         },
-        plugins: createPlugins(pathService, { visualize: options.visualize }),
+        plugins: createPlugins(pathService, {
+          visualize: options.visualize,
+          visualizations: createVisualizationOutputs(options)
+        }),
         onwarn: (warning, next) => {
           if (warning.code === "THIS_IS_UNDEFINED") return
           next(warning)
@@ -109,8 +130,6 @@ export class Rollup extends Context.Service<Rollup>()(
             }),
             (bundle) => Effect.promise(() => bundle.close())
           )
-          const fibers = yield* FiberSet.make()
-
           const { output } = yield* Effect.tryPromise({
             try: () => bundle.generate({ format: "esm" }),
             catch: (cause) => new RollupError({ cause })
@@ -123,31 +142,29 @@ export class Rollup extends Context.Service<Rollup>()(
             Stream.broadcast({ capacity: 8, replay: 8 })
           )
 
-          if (options.outputDirectory) {
-            const outputPath = pathService.join(
-              options.outputDirectory,
-              `${pathService.parse(options.path).name}.min.js`
+          const writeOutput = options.outputDirectory
+            ? stream.pipe(
+              Stream.run(fs.sink(pathService.join(
+                options.outputDirectory,
+                `${pathService.parse(options.path).name}.min.js`
+              ))),
+              Effect.mapError((cause) => new RollupError({ cause }))
             )
-            yield* FiberSet.run(
-              fibers,
-              stream.pipe(
-                Stream.run(fs.sink(outputPath))
+            : Effect.void
+
+          const [, sizeInBytes] = yield* Effect.all([
+            writeOutput,
+            stream.pipe(
+              NodeStream.pipeThroughDuplex({
+                evaluate: () => createGzip({ level: 9 }),
+                onError: (cause) => new RollupError({ cause })
+              }),
+              Stream.runFold(
+                () => 0,
+                (totalBytes, chunkBytes) => chunkBytes.length + totalBytes
               )
             )
-          }
-
-          const sizeInBytes = yield* stream.pipe(
-            NodeStream.pipeThroughDuplex({
-              evaluate: () => createGzip({ level: 9 }),
-              onError: (cause) => new RollupError({ cause })
-            }),
-            Stream.runFold(
-              () => 0,
-              (totalBytes, chunkBytes) => chunkBytes.length + totalBytes
-            )
-          )
-
-          yield* FiberSet.awaitEmpty(fibers)
+          ], { concurrency: 2 })
 
           yield* Effect.log(`Bundled ${options.path}`).pipe(
             Effect.annotateLogs({ size: `${(sizeInBytes / 1000).toFixed(2)} kB` })
@@ -163,7 +180,9 @@ export class Rollup extends Context.Service<Rollup>()(
           return yield* Effect.forEach(
             options.paths,
             (path) => bundle({ path, visualize: options.visualize, outputDirectory: options.outputDirectory }),
-            { concurrency: options.paths.length }
+            // Rollup retains a module graph for each active bundle, so unbounded
+            // concurrency can exhaust the Node.js heap on CI runners.
+            { concurrency: 4 }
           )
         }
       )

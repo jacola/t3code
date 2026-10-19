@@ -9,9 +9,10 @@
  *
  * When adding or renaming fixtures, keep in mind that comparison reports match
  * files by basename between the current fixtures directory and the provided
- * base directory. Each fixture is bundled as its own Rollup entrypoint, so it
- * should represent the import shape being measured and avoid depending on
- * incidental fixture discovery order.
+ * base directory. New fixtures without a matching base file are reported as
+ * unchanged. Each fixture is bundled as its own Rollup entrypoint, so it should
+ * represent the import shape being measured and avoid depending on incidental
+ * fixture discovery order.
  *
  * @since 4.0.0
  */
@@ -21,6 +22,7 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Order from "effect/Order"
 import * as Glob from "glob"
+import { fileURLToPath } from "node:url"
 
 /**
  * Context service that discovers and sorts TypeScript fixture files used by the bundle size tooling.
@@ -32,7 +34,7 @@ export class Fixtures extends Context.Service<Fixtures>()(
   "@effect/bundle/Fixtures",
   {
     make: Effect.gen(function*() {
-      const fixturesDir = new URL("../fixtures/", import.meta.url).pathname
+      const fixturesDir = fileURLToPath(new URL("../fixtures/", import.meta.url))
 
       const fixtures = yield* Effect.promise(() => Glob.glob("*.ts", { cwd: fixturesDir })).pipe(
         Effect.map(Array.sort(Order.String)),

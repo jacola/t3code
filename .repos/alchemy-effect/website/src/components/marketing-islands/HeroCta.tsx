@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AGENT_PROMPT as PROMPT } from "./agentPrompt";
+import { useAgentPrompt } from "./agentPrompt";
 
 export default function HeroCta() {
   return (
@@ -21,11 +21,14 @@ export default function HeroCta() {
           <a className="alc-btn alc-btn--primary" href="/getting-started">
             Get started <span aria-hidden>→</span>
           </a>
-          <a className="alc-btn alc-btn--secondary" href="/tutorial/part-1">
+          <a
+            className="alc-btn alc-btn--secondary"
+            href="/cloudflare/tutorial/part-1"
+          >
             Tutorial
           </a>
         </div>
-        <div className="hero-cta__line">
+        <div className="hero-cta__line" data-nosnippet="">
           <span>
             <span aria-hidden>🤖</span> Using a coding agent?
           </span>
@@ -38,6 +41,7 @@ export default function HeroCta() {
 
 function InlineCopyChip() {
   const [copied, setCopied] = useState(false);
+  const PROMPT = useAgentPrompt();
   const onCopy = () => copy(PROMPT, setCopied);
   return (
     <button
@@ -54,6 +58,7 @@ function InlineCopyChip() {
 
 function CopyCard() {
   const [copied, setCopied] = useState(false);
+  const PROMPT = useAgentPrompt();
   const onCopy = () => copy(PROMPT, setCopied);
   return (
     <button
@@ -70,7 +75,9 @@ function CopyCard() {
           {copied ? <CheckIcon /> : <CopyIcon />}
         </span>
       </span>
-      <code className="hero-cta__prompt-code">{PROMPT}</code>
+      <code className="hero-cta__prompt-code" data-nosnippet="">
+        {PROMPT}
+      </code>
     </button>
   );
 }

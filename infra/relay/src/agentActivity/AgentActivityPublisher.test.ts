@@ -7,7 +7,17 @@ import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as AgentActivityPublisher from "./AgentActivityPublisher.ts";
+import * as FcmDeliveries from "./FcmDeliveries.ts";
 import * as ApnsDeliveries from "./ApnsDeliveries.ts";
+
+const layerPublisher = AgentActivityPublisher.layer.pipe(
+  Layer.provide(
+    Layer.succeed(FcmDeliveries.FcmDeliveries, {
+      enqueue: () => Effect.succeed(null),
+      process: () => Effect.void,
+    }),
+  ),
+);
 
 const state: RelayAgentActivityState = {
   environmentId: "env" as RelayAgentActivityState["environmentId"],
@@ -28,6 +38,8 @@ function target(deviceId: string): LiveActivities.TargetRow {
     platform: "ios",
     ios_major_version: 18,
     app_version: "1.0.0",
+    bundle_id: null,
+    aps_environment: null,
     push_token: null,
     push_to_start_token: "start-token",
     preferences_json: "{}",
@@ -60,7 +72,9 @@ function makeAgentActivityRows(
   return {
     upsert: () => Effect.void,
     remove: () => Effect.void,
+    pruneTerminal: () => Effect.void,
     listForUser: () => Effect.succeed([state]),
+    getForUserThread: () => Effect.succeed(state),
     ...overrides,
   };
 }
@@ -70,7 +84,6 @@ function makeEnvironmentLinks(
 ): EnvironmentLinks.EnvironmentLinks["Service"] {
   return {
     upsert: () => Effect.void,
-    listUsersForEnvironment: () => Effect.succeed(["dev:julius"]),
     listDeliveryUsersForEnvironment: () =>
       Effect.succeed([
         {
@@ -79,9 +92,10 @@ function makeEnvironmentLinks(
           liveActivitiesEnabled: true,
         },
       ]),
-    listPublicKeysForEnvironment: () => Effect.succeed([]),
     listForUser: () => Effect.succeed([]),
     getForUser: () => Effect.succeed(null),
+    findActiveManagedForEnvironment: () => Effect.succeed([]),
+    setHoldWebhooksWhileOffline: () => Effect.void,
     revokeForUser: () => Effect.succeed(false),
     ...overrides,
   };
@@ -125,6 +139,64 @@ function makeApnsDeliveries(
 }
 
 describe("AgentActivityPublisher", () => {
+  it.effect("routes Android publication and registration replay to FCM alongside iOS", () => {
+    const android = { ...target("android"), platform: "android" as const, ios_major_version: null };
+    const ios = target("ios");
+    const fcmCalls: Array<Parameters<FcmDeliveries.FcmDeliveries["Service"]["enqueue"]>[0]> = [];
+    const appleDevices: string[] = [];
+    return Effect.gen(function* () {
+      const publisher = yield* AgentActivityPublisher.AgentActivityPublisher;
+      yield* publisher.publish({
+        environmentId: state.environmentId,
+        environmentPublicKey: "key",
+        threadId: state.threadId,
+        state,
+      });
+      yield* publisher.replayForLiveActivityRegistration({
+        userId: android.user_id,
+        deviceId: android.device_id,
+      });
+      expect(fcmCalls).toEqual([
+        { target: android, state },
+        { target: android, state: null, replay: true },
+      ]);
+      expect(appleDevices).toEqual(["ios"]);
+    }).pipe(
+      Effect.provide(
+        AgentActivityPublisher.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(AgentActivityRows.AgentActivityRows, makeAgentActivityRows()),
+              Layer.succeed(EnvironmentLinks.EnvironmentLinks, makeEnvironmentLinks()),
+              Layer.succeed(
+                LiveActivities.LiveActivities,
+                makeLiveActivities({ listTargets: () => Effect.succeed([android, ios]) }),
+              ),
+              Layer.succeed(
+                ApnsDeliveries.ApnsDeliveries,
+                makeApnsDeliveries({
+                  sendForTarget: (input) =>
+                    Effect.sync(() => {
+                      appleDevices.push(input.target.device_id);
+                      return null;
+                    }),
+                }),
+              ),
+              Layer.succeed(FcmDeliveries.FcmDeliveries, {
+                enqueue: (input) =>
+                  Effect.sync(() => {
+                    fcmCalls.push(input);
+                    return null;
+                  }),
+                process: () => Effect.void,
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+  });
+
   it.effect("replays the latest aggregate when a Live Activity token registers", () => {
     const registeredTarget: LiveActivities.TargetRow = {
       ...target("device-1"),
@@ -153,7 +225,7 @@ describe("AgentActivityPublisher", () => {
         });
       }).pipe(
         Effect.provide(
-          AgentActivityPublisher.layer.pipe(
+          layerPublisher.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(AgentActivityRows.AgentActivityRows, makeAgentActivityRows()),
@@ -226,7 +298,7 @@ describe("AgentActivityPublisher", () => {
         });
       }).pipe(
         Effect.provide(
-          AgentActivityPublisher.layer.pipe(
+          layerPublisher.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(
@@ -306,7 +378,7 @@ describe("AgentActivityPublisher", () => {
     const sentAggregates: Array<
       Parameters<ApnsDeliveries.ApnsDeliveries["Service"]["sendForTarget"]>[0]
     > = [];
-    const removals: Array<Parameters<AgentActivityRows.AgentActivityRows["Service"]["remove"]>[0]> =
+    const upserts: Array<Parameters<AgentActivityRows.AgentActivityRows["Service"]["upsert"]>[0]> =
       [];
 
     return Effect.gen(function* () {
@@ -320,15 +392,15 @@ describe("AgentActivityPublisher", () => {
         });
       }).pipe(
         Effect.provide(
-          AgentActivityPublisher.layer.pipe(
+          layerPublisher.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(
                   AgentActivityRows.AgentActivityRows,
                   makeAgentActivityRows({
-                    remove: (input) =>
+                    upsert: (input) =>
                       Effect.sync(() => {
-                        removals.push(input);
+                        upserts.push(input);
                       }),
                     listForUser: () => Effect.succeed([]),
                   }),
@@ -378,11 +450,10 @@ describe("AgentActivityPublisher", () => {
           ok: true,
         },
       ]);
-      expect(removals).toEqual([
+      expect(upserts).toEqual([
         {
-          environmentId: "env",
           environmentPublicKey: "environment-public-key",
-          threadId: "thread",
+          state: completedState,
         },
       ]);
       expect(sentAggregates).toHaveLength(1);
@@ -425,7 +496,7 @@ describe("AgentActivityPublisher", () => {
         });
       }).pipe(
         Effect.provide(
-          AgentActivityPublisher.layer.pipe(
+          layerPublisher.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(
@@ -512,7 +583,7 @@ describe("AgentActivityPublisher", () => {
   });
 
   it.effect(
-    "does not build Live Activity aggregates for links with Live Activities disabled",
+    "delivers notifications without querying activity rows when Live Activities are disabled",
     () => {
       const notificationState: RelayAgentActivityState = {
         ...state,
@@ -537,20 +608,14 @@ describe("AgentActivityPublisher", () => {
           });
         }).pipe(
           Effect.provide(
-            AgentActivityPublisher.layer.pipe(
+            layerPublisher.pipe(
               Layer.provide(
                 Layer.mergeAll(
                   Layer.succeed(
                     AgentActivityRows.AgentActivityRows,
                     makeAgentActivityRows({
                       listForUser: () =>
-                        Effect.succeed([
-                          {
-                            ...state,
-                            environmentId: "other-env" as RelayAgentActivityState["environmentId"],
-                            threadId: "other-thread" as RelayAgentActivityState["threadId"],
-                          },
-                        ]),
+                        Effect.die("Notification-only delivery must not read rows"),
                     }),
                   ),
                   Layer.succeed(
@@ -627,4 +692,180 @@ describe("AgentActivityPublisher", () => {
       });
     },
   );
+});
+
+describe("isExpiredAgentActivityState", () => {
+  const hourMs = 60 * 60 * 1_000;
+
+  it("expires running rows after two hours without an update", () => {
+    expect(AgentActivityPublisher.isExpiredAgentActivityState(state, 2 * hourMs - 1)).toBe(false);
+    expect(AgentActivityPublisher.isExpiredAgentActivityState(state, 2 * hourMs + 1)).toBe(true);
+  });
+
+  it("keeps waiting rows for a day", () => {
+    const waiting: RelayAgentActivityState = { ...state, phase: "waiting_for_approval" };
+    expect(AgentActivityPublisher.isExpiredAgentActivityState(waiting, 23 * hourMs)).toBe(false);
+    expect(AgentActivityPublisher.isExpiredAgentActivityState(waiting, 25 * hourMs)).toBe(true);
+  });
+
+  it("treats rows with unparseable timestamps as expired", () => {
+    expect(
+      AgentActivityPublisher.isExpiredAgentActivityState({ ...state, updatedAt: "not-a-date" }, 0),
+    ).toBe(true);
+  });
+});
+
+describe("makeAggregateState", () => {
+  const hourMs = 60 * 60 * 1_000;
+
+  it("drops expired rows from the aggregate", () => {
+    const fresh: RelayAgentActivityState = {
+      ...state,
+      threadId: "thread-fresh" as RelayAgentActivityState["threadId"],
+      updatedAt: "1970-01-01T03:00:00.000Z",
+    };
+    const aggregate = AgentActivityPublisher.makeAggregateState({
+      activeStates: [state, fresh],
+      terminalState: null,
+      nowMs: 3 * hourMs,
+    });
+
+    expect(aggregate?.activeCount).toBe(1);
+    expect(aggregate?.activities).toMatchObject([{ threadId: "thread-fresh" }]);
+  });
+
+  it("returns null when every row has expired and nothing terminal remains", () => {
+    expect(
+      AgentActivityPublisher.makeAggregateState({
+        activeStates: [state],
+        terminalState: null,
+        nowMs: 3 * hourMs,
+      }),
+    ).toBeNull();
+  });
+
+  it("still reports the terminal state when active rows have expired", () => {
+    const terminalState: RelayAgentActivityState = {
+      ...state,
+      phase: "completed",
+      updatedAt: "1970-01-01T03:00:00.000Z",
+    };
+    const aggregate = AgentActivityPublisher.makeAggregateState({
+      activeStates: [state],
+      terminalState,
+      nowMs: 3 * hourMs,
+    });
+
+    expect(aggregate?.activeCount).toBe(0);
+    expect(aggregate?.activities).toMatchObject([{ phase: "completed" }]);
+  });
+
+  it("keeps a recently finished thread visible as Done beside active agents", () => {
+    const active: RelayAgentActivityState = {
+      ...state,
+      threadId: "thread-active" as RelayAgentActivityState["threadId"],
+      updatedAt: "1970-01-01T00:58:00.000Z",
+    };
+    const justCompleted: RelayAgentActivityState = {
+      ...state,
+      threadId: "thread-done" as RelayAgentActivityState["threadId"],
+      phase: "completed",
+      updatedAt: "1970-01-01T00:59:00.000Z",
+    };
+    const aggregate = AgentActivityPublisher.makeAggregateState({
+      activeStates: [active, justCompleted],
+      terminalState: null,
+      nowMs: hourMs,
+    });
+
+    expect(aggregate?.activeCount).toBe(1);
+    expect(aggregate?.subtitle).toBe("Agent work in progress");
+    expect(aggregate?.activities).toMatchObject([
+      { threadId: "thread-active", phase: "running" },
+      { threadId: "thread-done", phase: "completed", status: "Done" },
+    ]);
+    expect(aggregate?.updatedAt).toBe("1970-01-01T00:59:00.000Z");
+  });
+
+  it("drops finished threads from the aggregate after the display window", () => {
+    const active: RelayAgentActivityState = {
+      ...state,
+      threadId: "thread-active" as RelayAgentActivityState["threadId"],
+      updatedAt: "1970-01-01T00:58:00.000Z",
+    };
+    const staleCompleted: RelayAgentActivityState = {
+      ...state,
+      threadId: "thread-done" as RelayAgentActivityState["threadId"],
+      phase: "completed",
+      updatedAt: "1970-01-01T00:44:00.000Z",
+    };
+    const aggregate = AgentActivityPublisher.makeAggregateState({
+      activeStates: [active, staleCompleted],
+      terminalState: null,
+      nowMs: hourMs,
+    });
+
+    expect(aggregate?.activities).toMatchObject([{ threadId: "thread-active" }]);
+  });
+
+  it("keeps showing recently finished work when nothing is active", () => {
+    const lingeringCompleted: RelayAgentActivityState = {
+      ...state,
+      phase: "completed",
+      updatedAt: "1970-01-01T00:59:00.000Z",
+    };
+    const aggregate = AgentActivityPublisher.makeAggregateState({
+      activeStates: [lingeringCompleted],
+      terminalState: null,
+      nowMs: hourMs,
+    });
+
+    expect(aggregate).toMatchObject({
+      activeCount: 0,
+      subtitle: "Agent work completed",
+      activities: [{ phase: "completed", status: "Done" }],
+    });
+    expect(
+      AgentActivityPublisher.makeAggregateState({
+        activeStates: [{ ...lingeringCompleted, updatedAt: "1970-01-01T00:44:00.000Z" }],
+        terminalState: null,
+        nowMs: hourMs,
+      }),
+    ).toBeNull();
+  });
+
+  it("gives active agents the display slots before finished ones", () => {
+    const mkActive = (id: string): RelayAgentActivityState => ({
+      ...state,
+      threadId: id as RelayAgentActivityState["threadId"],
+      updatedAt: "1970-01-01T00:58:00.000Z",
+    });
+    const justCompleted: RelayAgentActivityState = {
+      ...state,
+      threadId: "thread-done" as RelayAgentActivityState["threadId"],
+      phase: "completed",
+      updatedAt: "1970-01-01T00:59:00.000Z",
+    };
+    const aggregate = AgentActivityPublisher.makeAggregateState({
+      activeStates: [
+        mkActive("a-1"),
+        mkActive("a-2"),
+        mkActive("a-3"),
+        mkActive("a-4"),
+        mkActive("a-5"),
+        justCompleted,
+      ],
+      terminalState: null,
+      nowMs: hourMs,
+    });
+
+    expect(aggregate?.activeCount).toBe(5);
+    expect(aggregate?.activities).toMatchObject([
+      { threadId: "a-1" },
+      { threadId: "a-2" },
+      { threadId: "a-3" },
+      { threadId: "a-4" },
+      { threadId: "a-5" },
+    ]);
+  });
 });

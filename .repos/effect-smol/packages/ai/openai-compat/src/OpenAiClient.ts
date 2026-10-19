@@ -1,44 +1,28 @@
 /**
- * The `OpenAiClient` module provides an Effect service for calling
- * OpenAI-compatible chat completions and embeddings APIs. It builds on the
- * Effect HTTP client, adds authentication and OpenAI header handling, and
- * exposes typed helpers for regular responses, server-sent event streaming, and
- * embedding requests.
+ * The `OpenAiClient` module provides an Effect service for OpenAI-compatible
+ * chat completions and embeddings APIs. It builds on the Effect HTTP client,
+ * adds authentication and OpenAI organization or project headers, and exposes
+ * typed helpers for non-streaming chat completions, streaming chat completions,
+ * and embedding requests.
  *
- * **Common tasks**
- *
- * - Create a client service directly with {@link make}
- * - Provide the service as a layer with {@link layer} or {@link layerConfig}
- * - Send non-streaming chat completion requests with `createResponse`
- * - Send streaming chat completion requests with `createResponseStream`
- * - Generate embeddings with `createEmbedding`
- * - Reuse the exported request and response types when integrating compatible providers
- *
- * **Gotchas**
- *
- * - The default base URL is `https://api.openai.com/v1`; set `apiUrl` for other
- *   OpenAI-compatible providers.
- * - `createResponseStream` forces `stream: true` and requests usage events with
- *   `stream_options.include_usage`.
- * - HTTP and schema decoding failures are mapped into `AiError`.
- *
+ * @stability unstable
  * @since 4.0.0
  */
+import type * as AiError from "effect/ai/AiError"
 import * as Array from "effect/Array"
 import type * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
-import { identity, pipe } from "effect/Function"
+import * as Sse from "effect/encoding/Sse"
+import { identity } from "effect/Function"
+import * as Headers from "effect/http/Headers"
+import * as HttpClient from "effect/http/HttpClient"
+import * as HttpClientRequest from "effect/http/HttpClientRequest"
+import * as HttpClientResponse from "effect/http/HttpClientResponse"
 import * as Layer from "effect/Layer"
 import * as Redacted from "effect/Redacted"
 import * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
-import type * as AiError from "effect/unstable/ai/AiError"
-import * as Sse from "effect/unstable/encoding/Sse"
-import * as Headers from "effect/unstable/http/Headers"
-import * as HttpClient from "effect/unstable/http/HttpClient"
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest"
-import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse"
 import * as Errors from "./internal/errors.ts"
 import { OpenAiConfig } from "./OpenAiConfig.ts"
 
@@ -51,7 +35,8 @@ import { OpenAiConfig } from "./OpenAiConfig.ts"
  * completions, streaming chat completions, and embeddings. Transport and
  * schema decoding failures are mapped to `AiError`.
  *
- * @category models
+ * @stability unstable
+ * @category services
  * @since 4.0.0
  */
 export interface Service {
@@ -94,6 +79,7 @@ export interface Service {
  * @see {@link layer} for providing the service from explicit options
  * @see {@link layerConfig} for loading client settings from `Config`
  *
+ * @stability unstable
  * @category services
  * @since 4.0.0
  */
@@ -104,7 +90,8 @@ export class OpenAiClient extends Context.Service<OpenAiClient, Service>()(
 /**
  * Configuration options used to construct an OpenAI-compatible client.
  *
- * @category models
+ * @stability unstable
+ * @category options
  * @since 4.0.0
  */
 export type Options = {
@@ -116,17 +103,21 @@ export type Options = {
 }
 
 const RedactedOpenAiHeaders = {
-  OpenAiOrganization: "OpenAI-Organization",
-  OpenAiProject: "OpenAI-Project"
+  OpenAiOrganization: "openai-organization",
+  OpenAiProject: "openai-project"
 }
+
+const withRedactedHeaders = Effect.updateService(
+  Headers.CurrentRedactedNames,
+  Array.appendAll(Object.values(RedactedOpenAiHeaders))
+)
 
 /**
  * Constructs an OpenAI-compatible client service from explicit options.
  *
  * **When to use**
  *
- * Use to construct the OpenAI-compatible client service inside an effect when
- * you need the service value directly.
+ * Use when you need the OpenAI-compatible client service value inside an effect.
  *
  * **Details**
  *
@@ -143,6 +134,7 @@ const RedactedOpenAiHeaders = {
  * @see {@link layer} for providing this client from explicit options
  * @see {@link layerConfig} for loading client settings from `Config`
  *
+ * @stability unstable
  * @category constructors
  * @since 4.0.0
  */
@@ -193,24 +185,27 @@ export const make = Effect.fnUntraced(
       [body: CreateResponse200, response: HttpClientResponse.HttpClientResponse],
       AiError.AiError
     > =>
-      Effect.flatMap(resolveHttpClient, (client) =>
-        pipe(
-          HttpClientRequest.post("/chat/completions"),
-          HttpClientRequest.bodyJsonUnsafe(payload),
-          HttpClient.filterStatusOk(client).execute,
-          Effect.flatMap((response) =>
-            Effect.map(decodeResponse(response), (
-              body
-            ): [CreateResponse200, HttpClientResponse.HttpClientResponse] => [
-              body,
-              response
-            ])
-          ),
-          Effect.catchTags({
-            HttpClientError: (error) => Errors.mapHttpClientError(error, "createResponse"),
-            SchemaError: (error) => Effect.fail(Errors.mapSchemaError(error, "createResponse"))
-          })
-        ))
+      resolveHttpClient.pipe(
+        Effect.flatMap((client) =>
+          HttpClientRequest.post("/chat/completions").pipe(
+            HttpClientRequest.bodyJsonUnsafe(payload),
+            HttpClient.filterStatusOk(client).execute,
+            Effect.flatMap((response) =>
+              Effect.map(decodeResponse(response), (
+                body
+              ): [CreateResponse200, HttpClientResponse.HttpClientResponse] => [
+                body,
+                response
+              ])
+            ),
+            Effect.catchTags({
+              HttpClientError: (error) => Errors.mapHttpClientError(error, "createResponse"),
+              SchemaError: (error) => Effect.fail(Errors.mapSchemaError(error, "createResponse"))
+            })
+          )
+        ),
+        withRedactedHeaders
+      )
 
     const buildResponseStream = (
       response: HttpClientResponse.HttpClientResponse
@@ -228,6 +223,7 @@ export const make = Effect.fnUntraced(
         Stream.takeUntil((event) => event === "[DONE]"),
         Stream.catchTags({
           Retry: (error) => Stream.die(error),
+          SseError: (error) => Stream.fail(Errors.mapSseError(error, "createResponseStream")),
           HttpClientError: (error) => Stream.fromEffect(Errors.mapHttpClientError(error, "createResponseStream"))
         })
       ) as any
@@ -235,40 +231,46 @@ export const make = Effect.fnUntraced(
     }
 
     const createResponseStream: Service["createResponseStream"] = (payload) =>
-      Effect.flatMap(resolveHttpClient, (client) =>
-        pipe(
-          HttpClientRequest.post("/chat/completions"),
-          HttpClientRequest.bodyJsonUnsafe({
-            ...payload,
-            stream: true,
-            stream_options: {
-              include_usage: true
-            }
-          }),
-          HttpClient.filterStatusOk(client).execute,
-          Effect.map(buildResponseStream),
-          Effect.catchTag(
-            "HttpClientError",
-            (error) => Errors.mapHttpClientError(error, "createResponseStream")
+      resolveHttpClient.pipe(
+        Effect.flatMap((client) =>
+          HttpClientRequest.post("/chat/completions").pipe(
+            HttpClientRequest.bodyJsonUnsafe({
+              ...payload,
+              stream: true,
+              stream_options: {
+                include_usage: true
+              }
+            }),
+            HttpClient.filterStatusOk(client).execute,
+            Effect.map(buildResponseStream),
+            Effect.catchTag(
+              "HttpClientError",
+              (error) => Errors.mapHttpClientError(error, "createResponseStream")
+            )
           )
-        ))
+        ),
+        withRedactedHeaders
+      )
 
     const decodeEmbedding = HttpClientResponse.schemaBodyJson(CreateEmbeddingResponseSchema)
 
     const createEmbedding = (
       payload: CreateEmbeddingRequestJson
     ): Effect.Effect<CreateEmbedding200, AiError.AiError> =>
-      Effect.flatMap(resolveHttpClient, (client) =>
-        pipe(
-          HttpClientRequest.post("/embeddings"),
-          HttpClientRequest.bodyJsonUnsafe(payload),
-          HttpClient.filterStatusOk(client).execute,
-          Effect.flatMap(decodeEmbedding),
-          Effect.catchTags({
-            HttpClientError: (error) => Errors.mapHttpClientError(error, "createEmbedding"),
-            SchemaError: (error) => Effect.fail(Errors.mapSchemaError(error, "createEmbedding"))
-          })
-        ))
+      resolveHttpClient.pipe(
+        Effect.flatMap((client) =>
+          HttpClientRequest.post("/embeddings").pipe(
+            HttpClientRequest.bodyJsonUnsafe(payload),
+            HttpClient.filterStatusOk(client).execute,
+            Effect.flatMap(decodeEmbedding),
+            Effect.catchTags({
+              HttpClientError: (error) => Errors.mapHttpClientError(error, "createEmbedding"),
+              SchemaError: (error) => Effect.fail(Errors.mapSchemaError(error, "createEmbedding"))
+            })
+          )
+        ),
+        withRedactedHeaders
+      )
 
     return OpenAiClient.of({
       client: httpClient,
@@ -277,10 +279,7 @@ export const make = Effect.fnUntraced(
       createEmbedding
     })
   },
-  Effect.updateService(
-    Headers.CurrentRedactedNames,
-    Array.appendAll(Object.values(RedactedOpenAiHeaders))
-  )
+  withRedactedHeaders
 )
 
 /**
@@ -294,6 +293,7 @@ export const make = Effect.fnUntraced(
  * @see {@link make} for constructing the client service effectfully
  * @see {@link layerConfig} for loading client settings from `Config`
  *
+ * @stability unstable
  * @category layers
  * @since 4.0.0
  */
@@ -306,8 +306,8 @@ export const layer = (options: Options): Layer.Layer<OpenAiClient, never, HttpCl
  *
  * **When to use**
  *
- * Use when OpenAI-compatible client settings should be read from Effect
- * `Config` values while providing `OpenAiClient` as a layer.
+ * Use when you need client settings for OpenAI-compatible APIs to be read from
+ * Effect `Config` values while providing `OpenAiClient` as a layer.
  *
  * **Details**
  *
@@ -318,6 +318,7 @@ export const layer = (options: Options): Layer.Layer<OpenAiClient, never, HttpCl
  * @see {@link make} for constructing the client service effectfully
  * @see {@link layer} for providing the client from already-resolved options
  *
+ * @stability unstable
  * @category layers
  * @since 4.0.0
  */
@@ -358,7 +359,8 @@ type JsonObject = { readonly [x: string]: Schema.Json }
 /**
  * Optional response fields that can be requested with the `include` parameter.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type IncludeEnum =
@@ -369,6 +371,7 @@ export type IncludeEnum =
 /**
  * Lifecycle status shared by message, reasoning, and tool-call items.
  *
+ * @stability unstable
  * @category models
  * @since 4.0.0
  */
@@ -397,7 +400,8 @@ type InputFileContent = {
 /**
  * Content blocks accepted in input messages.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type InputContent = InputTextContent | InputImageContent | InputFileContent
@@ -405,7 +409,8 @@ export type InputContent = InputTextContent | InputImageContent | InputFileConte
 /**
  * Text content block used for model-provided reasoning summaries.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type SummaryTextContent = {
@@ -467,7 +472,8 @@ type FilePathAnnotation = {
 /**
  * Citation and file-path annotations attached to output text content.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type Annotation =
@@ -506,7 +512,8 @@ type OutputMessage = {
  * Reasoning output item containing encrypted reasoning content, summaries, and
  * optional reasoning text.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ReasoningItem = {
@@ -563,7 +570,8 @@ type ItemReference = {
  * Supports input messages, output messages, tool calls, tool outputs, reasoning
  * items, custom tool interactions, and item references.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type InputItem =
@@ -604,7 +612,8 @@ type CustomToolParam = {
 /**
  * Tool definitions that can be supplied to a Responses-style request.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type Tool =
@@ -633,6 +642,7 @@ type ToolChoice =
  * Text output format configuration for plain text, JSON object, or JSON Schema
  * responses.
  *
+ * @stability unstable
  * @category configuration
  * @since 4.0.0
  */
@@ -655,7 +665,8 @@ export type TextResponseFormatConfiguration =
  * Request options for creating a Responses-style response with an
  * OpenAI-compatible provider.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type CreateResponse = {
@@ -695,7 +706,8 @@ export type CreateResponse = {
 /**
  * Token accounting reported on Responses-style response objects.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ResponseUsage = {
@@ -716,7 +728,8 @@ type OutputItem =
  * Responses-style response object returned by compatible providers or embedded
  * in response stream lifecycle events.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type Response = {
@@ -845,6 +858,7 @@ type UnknownResponseStreamEvent = {
 /**
  * Server-sent event shapes emitted by Responses-style response streams.
  *
+ * @stability unstable
  * @category streaming
  * @since 4.0.0
  */
@@ -873,7 +887,8 @@ export type ResponseStreamEvent =
  * string. The `index` field identifies the input item that produced this
  * embedding.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type Embedding = {
@@ -885,7 +900,8 @@ export type Embedding = {
 /**
  * Request payload for the embeddings endpoint.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type CreateEmbeddingRequest = {
@@ -899,7 +915,8 @@ export type CreateEmbeddingRequest = {
 /**
  * Successful response payload returned by the embeddings endpoint.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type CreateEmbeddingResponse = {
@@ -915,21 +932,24 @@ export type CreateEmbeddingResponse = {
 /**
  * JSON request body accepted by the embeddings endpoint.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type CreateEmbeddingRequestJson = CreateEmbeddingRequest
 /**
  * Decoded successful embeddings response body.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type CreateEmbedding200 = CreateEmbeddingResponse
 /**
  * Structured content parts accepted in chat completion messages.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionContentPart =
@@ -947,7 +967,8 @@ export type ChatCompletionContentPart =
 /**
  * Tool call data attached to an assistant chat completion message.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionRequestToolCall = {
@@ -961,7 +982,8 @@ export type ChatCompletionRequestToolCall = {
 /**
  * Message shapes accepted by the chat completions endpoint.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionRequestMessage =
@@ -978,7 +1000,8 @@ export type ChatCompletionRequestMessage =
 /**
  * Function tool definition accepted by the chat completions endpoint.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionTool = {
@@ -993,6 +1016,7 @@ export type ChatCompletionTool = {
 /**
  * Controls whether the model may call tools and can force a specific function.
  *
+ * @stability unstable
  * @category configuration
  * @since 4.0.0
  */
@@ -1009,6 +1033,7 @@ export type ChatCompletionToolChoice =
 /**
  * JSON response format configuration for chat completion requests.
  *
+ * @stability unstable
  * @category configuration
  * @since 4.0.0
  */
@@ -1028,7 +1053,8 @@ export type ChatCompletionResponseFormat =
 /**
  * Request payload for the OpenAI-compatible chat completions endpoint.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionRequest = {
@@ -1054,28 +1080,31 @@ export type ChatCompletionRequest = {
 /**
  * JSON request body used by this client when creating a chat completion response.
  *
- * @category request
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type CreateResponseRequestJson = ChatCompletionRequest
 /**
  * Decoded successful chat completion response body returned by `createResponse`.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type CreateResponse200 = ChatCompletionResponse
 /**
  * Decoded server-sent event payload emitted by `createResponseStream`.
  *
+ * @stability unstable
  * @category streaming
  * @since 4.0.0
  */
 export type CreateResponse200Sse = ChatCompletionStreamEvent
 
 const EmbeddingSchema = Schema.Struct({
-  embedding: Schema.Union([Schema.Array(Schema.Number), Schema.String]),
-  index: Schema.Number,
+  embedding: Schema.Union([Schema.Array(Schema.Finite), Schema.String]),
+  index: Schema.Int,
   object: Schema.optionalKey(Schema.String)
 })
 
@@ -1084,8 +1113,8 @@ const CreateEmbeddingResponseSchema = Schema.Struct({
   model: Schema.String,
   object: Schema.optionalKey(Schema.Literal("list")),
   usage: Schema.optionalKey(Schema.Struct({
-    prompt_tokens: Schema.Number,
-    total_tokens: Schema.Number
+    prompt_tokens: Schema.Int,
+    total_tokens: Schema.Int
   }))
 })
 
@@ -1095,20 +1124,24 @@ const ChatCompletionToolFunction = Schema.Struct({
 })
 
 const ChatCompletionToolFunctionDelta = Schema.Struct({
-  name: Schema.optionalKey(Schema.String),
+  // Some OpenAI-compatible providers (e.g. Fireworks) send `name: null` on
+  // streamed tool-call continuation fragments. `name` must be nullable, else
+  // the whole chunk fails validation and its argument delta is dropped.
+  name: Schema.optionalKey(Schema.NullOr(Schema.String)),
   arguments: Schema.optionalKey(Schema.String)
 })
 
 const ChatCompletionToolCall = Schema.Struct({
   id: Schema.optionalKey(Schema.String),
-  index: Schema.optionalKey(Schema.Number),
+  index: Schema.optionalKey(Schema.Int),
   type: Schema.optionalKey(Schema.String),
   function: Schema.optionalKey(ChatCompletionToolFunction)
 })
 
 const ChatCompletionToolCallDelta = Schema.Struct({
-  id: Schema.optionalKey(Schema.String),
-  index: Schema.optionalKey(Schema.Number),
+  // Some providers send `id: null` on tool-call continuation fragments.
+  id: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  index: Schema.optionalKey(Schema.Int),
   type: Schema.optionalKey(Schema.String),
   function: Schema.optionalKey(ChatCompletionToolFunctionDelta)
 })
@@ -1116,26 +1149,34 @@ const ChatCompletionToolCallDelta = Schema.Struct({
 const ChatCompletionMessage = Schema.Struct({
   role: Schema.optionalKey(Schema.String),
   content: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  reasoning: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  reasoning_content: Schema.optionalKey(Schema.NullOr(Schema.String)),
   tool_calls: Schema.optionalKey(Schema.Array(ChatCompletionToolCall))
 })
 
 const ChatCompletionDelta = Schema.Struct({
-  role: Schema.optionalKey(Schema.String),
+  // Some providers send `role: null` on streamed text deltas.
+  role: Schema.optionalKey(Schema.NullOr(Schema.String)),
   content: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  tool_calls: Schema.optionalKey(Schema.Array(ChatCompletionToolCallDelta))
+  reasoning: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  reasoning_content: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  // Some OpenAI-compatible providers send `tool_calls: null` when a streamed
+  // chunk contains only text. Accepting null keeps the text-bearing chunk from
+  // being classified as an unknown event.
+  tool_calls: Schema.optionalKey(Schema.NullOr(Schema.Array(ChatCompletionToolCallDelta)))
 })
 
 const ChatCompletionChoice = Schema.Struct({
-  index: Schema.Number,
+  index: Schema.Int,
   finish_reason: Schema.optionalKey(Schema.NullOr(Schema.String)),
   message: Schema.optionalKey(ChatCompletionMessage),
   delta: Schema.optionalKey(ChatCompletionDelta)
 })
 
 const ChatCompletionUsage = Schema.Struct({
-  prompt_tokens: Schema.Number,
-  completion_tokens: Schema.Number,
-  total_tokens: Schema.Number,
+  prompt_tokens: Schema.Int,
+  completion_tokens: Schema.Int,
+  total_tokens: Schema.Int,
   prompt_tokens_details: Schema.optionalKey(Schema.Any),
   completion_tokens_details: Schema.optionalKey(Schema.Any)
 })
@@ -1143,7 +1184,7 @@ const ChatCompletionUsage = Schema.Struct({
 const ChatCompletionResponse = Schema.Struct({
   id: Schema.String,
   model: Schema.String,
-  created: Schema.Number,
+  created: Schema.Int,
   choices: Schema.Array(ChatCompletionChoice),
   usage: Schema.optionalKey(Schema.NullOr(ChatCompletionUsage)),
   service_tier: Schema.optionalKey(Schema.String)
@@ -1152,7 +1193,7 @@ const ChatCompletionResponse = Schema.Struct({
 const ChatCompletionChunk = Schema.Struct({
   id: Schema.String,
   model: Schema.String,
-  created: Schema.Number,
+  created: Schema.Int,
   choices: Schema.Array(ChatCompletionChoice),
   usage: Schema.optionalKey(Schema.NullOr(ChatCompletionUsage)),
   service_tier: Schema.optionalKey(Schema.String)
@@ -1161,53 +1202,71 @@ const ChatCompletionChunk = Schema.Struct({
 /**
  * Decoded tool-call object from a chat completion response or streaming chunk.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionToolCall = typeof ChatCompletionToolCall.Type
 /**
  * Decoded message object from a non-streaming chat completion choice.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionMessage = typeof ChatCompletionMessage.Type
 /**
  * Decoded choice object returned by chat completion responses and chunks.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionChoice = typeof ChatCompletionChoice.Type
 /**
  * Decoded token usage summary returned by chat completions.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionUsage = typeof ChatCompletionUsage.Type
 /**
  * Decoded successful response from the chat completions endpoint.
  *
- * @category response
+ * @stability unstable
+ * @category models
  * @since 4.0.0
  */
 export type ChatCompletionResponse = typeof ChatCompletionResponse.Type
 /**
  * Decoded streaming chunk emitted by the chat completions endpoint.
  *
+ * @stability unstable
  * @category streaming
  * @since 4.0.0
  */
 export type ChatCompletionChunk = typeof ChatCompletionChunk.Type
 /**
- * Streaming chat completion event, including decoded chunks and the `[DONE]`
- * sentinel.
+ * A parsed chat completion event that does not match the expected chunk schema.
  *
+ * @stability unstable
  * @category streaming
  * @since 4.0.0
  */
-export type ChatCompletionStreamEvent = ChatCompletionChunk | "[DONE]"
+export interface UnknownChatCompletionEvent {
+  readonly _tag: "UnknownChatCompletionEvent"
+  readonly data: unknown
+}
+/**
+ * Streaming chat completion event, including decoded chunks, unknown parsed
+ * events, and the `[DONE]` sentinel.
+ *
+ * @stability unstable
+ * @category streaming
+ * @since 4.0.0
+ */
+export type ChatCompletionStreamEvent = ChatCompletionChunk | UnknownChatCompletionEvent | "[DONE]"
 
 const parseJson = (value: string): unknown => {
   try {
@@ -1226,7 +1285,11 @@ const decodeChatCompletionSseData = (
     return data
   }
   const parsed = parseJson(data)
-  return isChatCompletionChunk(parsed)
-    ? parsed
-    : undefined
+  if (parsed === undefined) {
+    return undefined
+  }
+  return isChatCompletionChunk(parsed) ? parsed : {
+    _tag: "UnknownChatCompletionEvent",
+    data: parsed
+  }
 }

@@ -1,41 +1,28 @@
 /**
- * Utilities for applying Effect SQL migrations to embedded PGlite databases.
+ * Runs database migrations for PGlite projects that use Effect SQL.
  *
- * This module re-exports the shared `Migrator` loaders and error types, then
- * provides `run` and `layer` helpers for applying ordered migrations through the
- * current PGlite-backed `SqlClient`. It is typically used to bootstrap schemas
- * for local-first applications, browser or Node.js integration tests, examples,
- * and layer graphs that need an embedded PostgreSQL-compatible database to be
- * ready before dependent services start.
- *
- * Migrations are recorded in `effect_sql_migrations` by default and are loaded
- * using the shared `<id>_<name>` file or record-key convention. PGlite uses
- * PostgreSQL semantics inside the embedded database, so migrations run in a
- * transaction and the shared migrator uses PostgreSQL table locking to avoid
- * concurrent runners. Coordinate every process or layer using the same
- * `liveClient` or `dataDir`, and remember that in-memory PGlite clients start
- * with no recorded migrations. This adapter does not currently write schema
- * dumps for `schemaDirectory`; use PGlite data-directory persistence or
- * `PgliteClient.dumpDataDir` when a portable embedded database snapshot is
- * needed.
+ * This module re-exports the shared migration loaders and errors, then provides
+ * `run` and `layer` helpers that apply pending migration files with the current
+ * `SqlClient`. It does not require a separate PGlite service; the active SQL
+ * client supplies the database connection.
  *
  * @since 4.0.0
  */
 import type * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
-import * as Migrator from "effect/unstable/sql/Migrator"
-import type * as Client from "effect/unstable/sql/SqlClient"
-import type { SqlError } from "effect/unstable/sql/SqlError"
+import * as Migrator from "effect/sql/Migrator"
+import type * as Client from "effect/sql/SqlClient"
+import type { SqlError } from "effect/sql/SqlError"
 
 /**
  * @since 4.0.0
  */
-export * from "effect/unstable/sql/Migrator"
+export * from "effect/sql/Migrator"
 
 /**
  * Runs SQL migrations using the configured `SqlClient`, returning the migrations that were applied.
  *
- * @category constructors
+ * @category running
  * @since 4.0.0
  */
 export const run: <R2 = never>(
@@ -49,7 +36,7 @@ export const run: <R2 = never>(
 /**
  * Creates a layer that runs the configured SQL migrations during layer construction.
  *
- * @category constructors
+ * @category layers
  * @since 4.0.0
  */
 export const layer = <R>(

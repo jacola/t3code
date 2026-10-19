@@ -1,7 +1,5 @@
-import { SymbolView } from "expo-symbols";
-import { Pressable, StyleSheet, useColorScheme } from "react-native";
-
-import { useThemeColor } from "../../lib/useThemeColor";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { Pressable } from "react-native";
 
 export type SidebarFilterButtonIcon =
   | "line.3.horizontal.decrease.circle"
@@ -10,46 +8,20 @@ export type SidebarFilterButtonIcon =
 export function SidebarFilterButton(props: {
   readonly accessibilityLabel: string;
   readonly icon: SidebarFilterButtonIcon;
-  /** Rendered inside a shared capsule group — no own background/border. */
-  readonly grouped?: boolean;
 }) {
-  const iconColor = useThemeColor("--color-foreground");
-  const pressedBackgroundColor = useThemeColor("--color-subtle");
-  const colorScheme = useColorScheme() === "dark" ? "dark" : "light";
-  const idleBackgroundColor =
-    colorScheme === "dark" ? "rgba(118,118,128,0.24)" : "rgba(255,255,255,0.72)";
-  const borderColor = colorScheme === "dark" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
-
   return (
     <Pressable
+      className="size-11 cursor-pointer items-center justify-center rounded-full bg-subtle active:opacity-70"
       accessibilityLabel={props.accessibilityLabel}
       accessibilityRole="button"
       hitSlop={4}
-      style={({ pressed }) => [
-        styles.button,
-        props.grouped
-          ? { backgroundColor: pressed ? pressedBackgroundColor : "transparent", borderWidth: 0 }
-          : {
-              backgroundColor: pressed ? pressedBackgroundColor : idleBackgroundColor,
-              borderColor,
-            },
-      ]}
     >
-      <SymbolView name={props.icon} size={20} tintColor={iconColor} type="monochrome" />
+      <SymbolView
+        name={props.icon}
+        size={16}
+        tintColorClassName="accent-foreground"
+        type="monochrome"
+      />
     </Pressable>
   );
 }
-
-const styles = StyleSheet.create({
-  button: {
-    // Match the native glass UIBarButtonItem group metrics (~50pt slots,
-    // 44pt bar height, label-colored ~20pt glyphs).
-    width: 50,
-    height: 44,
-    borderRadius: 22,
-    borderWidth: StyleSheet.hairlineWidth,
-    alignItems: "center",
-    justifyContent: "center",
-    cursor: "pointer",
-  },
-});

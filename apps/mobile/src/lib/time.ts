@@ -1,12 +1,11 @@
 export function relativeTime(input: string): string {
   const timestamp = Date.parse(input);
   if (Number.isNaN(timestamp)) {
-    return "now";
+    return "<1m";
   }
 
   const deltaSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (deltaSeconds < 10) return "now";
-  if (deltaSeconds < 60) return `${deltaSeconds}s`;
+  if (deltaSeconds < 60) return "<1m";
 
   const deltaMinutes = Math.floor(deltaSeconds / 60);
   if (deltaMinutes < 60) return `${deltaMinutes}m`;

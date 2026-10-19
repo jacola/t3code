@@ -2,41 +2,19 @@
  * Typed metadata builders for Microsoft SQL Server stored procedure calls.
  *
  * This module defines the `Procedure` values consumed by `MssqlClient.call`.
- * Use it when application code invokes SQL Server stored procedures for
- * commands, reports, migrations, or workflows that need explicit Tedious
- * parameter metadata, output parameters, and typed result rows.
+ * `make` starts a procedure definition, `param` and `outputParam` add typed
+ * Tedious parameter metadata, `withRows` sets the expected row type, and
+ * `compile` binds input values before execution. The module also defines the
+ * typed result shape for output parameters and returned rows.
  *
- * **Mental model**
- *
- * A `Procedure` is a typed description, not an executable request. Start with
- * `make`, add input parameters with `param` and output parameters with
- * `outputParam`, optionally attach the expected row type with `withRows`, and
- * finish with `compile` to bind the input value record. `MssqlClient.call`
- * turns the compiled value into a Tedious request, registers output parameters,
- * and returns output values separately from returned rows.
- *
- * **Common tasks**
- *
- * Use `param<A>()` for every input parameter whose value should appear in the
- * record passed to `compile`, and `outputParam<A>()` for values collected from
- * SQL Server `returnValue` events. Use `withRows<A>()` when the procedure
- * returns a result set and callers should see a typed row array.
- *
- * **Gotchas**
- *
- * The generic type arguments are supplied explicitly; they are not inferred from
- * Tedious `DataType`s or `ParameterOptions`. Parameter names should match the
- * stored procedure parameter names used by Tedious, typically without a leading
- * `@`. `withRows` records only the expected TypeScript row type; runtime row
- * names and transforms still follow the configured `MssqlClient`.
- *
+ * @stability unstable
  * @since 4.0.0
  */
 import { identity } from "effect/Function"
 import type { Pipeable } from "effect/Pipeable"
 import { pipeArguments } from "effect/Pipeable"
+import type { Row } from "effect/sql/SqlConnection"
 import type { Covariant } from "effect/Types"
-import type { Row } from "effect/unstable/sql/SqlConnection"
 import type { DataType } from "tedious/lib/data-type.ts"
 import type { ParameterOptions } from "tedious/lib/request.ts"
 import * as Parameter from "./Parameter.ts"
@@ -44,6 +22,7 @@ import * as Parameter from "./Parameter.ts"
 /**
  * Runtime type identifier used to mark SQL Server stored procedure definitions.
  *
+ * @stability unstable
  * @category type IDs
  * @since 4.0.0
  */
@@ -52,6 +31,7 @@ export const TypeId: TypeId = "~@effect/sql-mssql/Procedure"
 /**
  * Type-level identifier used to mark SQL Server stored procedure definitions.
  *
+ * @stability unstable
  * @category type IDs
  * @since 4.0.0
  */
@@ -60,6 +40,7 @@ export type TypeId = "~@effect/sql-mssql/Procedure"
 /**
  * Pipeable definition of a SQL Server stored procedure, tracking its input parameters, output parameters, and result row type.
  *
+ * @stability unstable
  * @category models
  * @since 4.0.0
  */
@@ -80,6 +61,7 @@ export interface Procedure<
 /**
  * Stored procedure definition with concrete input values bound for execution.
  *
+ * @stability unstable
  * @category models
  * @since 4.0.0
  */
@@ -94,12 +76,14 @@ export interface ProcedureWithValues<
 /**
  * Namespace containing type helpers and result types for SQL Server stored procedures.
  *
+ * @stability unstable
  * @since 4.0.0
  */
 export declare namespace Procedure {
   /**
    * Maps a record of `Parameter` metadata to the corresponding record of parameter value types.
    *
+   * @stability unstable
    * @category utility types
    * @since 4.0.0
    */
@@ -115,6 +99,7 @@ export declare namespace Procedure {
   /**
    * Result of a SQL Server stored procedure call, containing typed output parameter values and returned rows.
    *
+   * @stability unstable
    * @category models
    * @since 4.0.0
    */
@@ -142,6 +127,7 @@ const procedureProto = {
 /**
  * Creates an empty SQL Server stored procedure definition for the given procedure name.
  *
+ * @stability unstable
  * @category constructors
  * @since 4.0.0
  */
@@ -156,7 +142,8 @@ export const make = (name: string): Procedure<{}, {}> => {
 /**
  * Adds a typed input parameter to a SQL Server stored procedure definition.
  *
- * @category combinator
+ * @stability unstable
+ * @category combinators
  * @since 4.0.0
  */
 export const param = <A>() =>
@@ -181,7 +168,8 @@ export const param = <A>() =>
 /**
  * Adds a typed output parameter to a SQL Server stored procedure definition.
  *
- * @category combinator
+ * @stability unstable
+ * @category combinators
  * @since 4.0.0
  */
 export const outputParam = <A>() =>
@@ -206,7 +194,8 @@ export const outputParam = <A>() =>
 /**
  * Sets the expected row type for a SQL Server stored procedure definition.
  *
- * @category combinator
+ * @stability unstable
+ * @category combinators
  * @since 4.0.0
  */
 export const withRows = <A extends object = Row>() =>
@@ -220,7 +209,8 @@ export const withRows = <A extends object = Row>() =>
 /**
  * Binds input values to a SQL Server stored procedure definition, producing a value that can be executed with `MssqlClient.call`.
  *
- * @category combinator
+ * @stability unstable
+ * @category combinators
  * @since 4.0.0
  */
 export const compile = <

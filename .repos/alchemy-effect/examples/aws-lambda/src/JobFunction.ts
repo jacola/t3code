@@ -2,8 +2,8 @@ import * as AWS from "alchemy/AWS";
 import { Stack } from "alchemy/Stack";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import { HttpServerRequest } from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import {
   JobNotifications,
   JobNotificationsSNS,
@@ -19,9 +19,9 @@ import {
 export default class JobFunction extends AWS.Lambda.Function<JobFunction>()(
   "JobFunction",
   Stack.useSync((stack) => ({
-    main: import.meta.filename,
-    memory: stack.stage === "prod" ? 1024 : 512,
-    url: true,
+    main: import.meta.url,
+    memorySize: stack.stage === "prod" ? 1024 : 512,
+    functionUrl: true,
   })),
   Effect.gen(function* () {
     const jobStorage = yield* JobStorage;

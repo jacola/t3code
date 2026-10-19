@@ -1,9 +1,12 @@
 import * as Effect from "effect/Effect";
 import { identity } from "effect/Function";
 import * as Schedule from "effect/Schedule";
-import * as HttpClient from "effect/unstable/http/HttpClient";
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientError from "effect/http/HttpClientError";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
+import * as HttpApiError from "effect/http-api/HttpApiError";
+import { profileCommandHint } from "../Util/interactive.ts";
 import { StateApi } from "./HttpStateApi.ts";
 
 import type { ReplacedResourceState, ResourceState } from "./ResourceState.ts";
@@ -59,10 +62,15 @@ export const checkHttpStateStoreAuth = ({
       Effect.retry({
         while: (error) =>
           error._tag === "HttpClientError" &&
-          !!error.response &&
-          // worker can 404 for a bit on first deploy
-          (error.response.status === 404 || error.response.status >= 500),
-        schedule: Schedule.fixed(200),
+          // transport-level failures (no response — DNS, TCP reset, TLS,
+          // "fetch failed") are as transient as the post-deploy 404s
+          (!error.response ||
+            // worker can 404 for a bit on first deploy
+            error.response.status === 404 ||
+            error.response.status >= 500),
+        // Bounded: a store that 404s/500s forever is a hard failure, not
+        // something to spin on until the process is killed.
+        schedule: Schedule.max([Schedule.fixed(200), Schedule.recurs(75)]),
       }),
     );
   });
@@ -220,23 +228,51 @@ const retryTransient = <A, Err, Req>(eff: Effect.Effect<A, Err, Req>) =>
     // Exponential backoff capped at 2s, max 5 attempts. Beyond that
     // the issue isn't transient and we'd rather surface a hard
     // failure than block the deploy indefinitely.
-    schedule: Schedule.exponential(100).pipe(
-      Schedule.either(Schedule.spaced("2 seconds")),
-      Schedule.both(Schedule.recurs(5)),
-    ),
+    schedule: Schedule.max([
+      Schedule.min([Schedule.exponential(100), Schedule.spaced("2 seconds")]),
+      Schedule.recurs(5),
+    ]),
   });
+
+/**
+ * Describe a state-store failure using only its known kind and HTTP status.
+ * Client/decoder messages and causes can contain serialized state, including
+ * secrets unwrapped by encodeState, so they must not become diagnostics.
+ */
+export const describeStateStoreFailure = (
+  e: unknown,
+  profileCommand = "alchemy profile edit",
+): string => {
+  if (e instanceof HttpApiError.Unauthorized) {
+    return (
+      "State store rejected the request as unauthorized. " +
+      `The stored state-store credentials may be stale. Run \`${profileCommand}\` to reconfigure them.`
+    );
+  }
+  if (HttpClientError.isHttpClientError(e)) {
+    const status = e.response?.status;
+    return `State store request failed (${e.reason._tag}${status === undefined ? "" : `, HTTP ${status}`}).`;
+  }
+  return "State store request failed.";
+};
 
 /** Collapse any client failure into a {@link StateStoreError}. */
 const mapStateStoreError = <A, E, R>(eff: Effect.Effect<A, E, R>) =>
   eff.pipe(
     retryTransient,
-    Effect.tapError(Effect.log),
     Effect.catch((e: E) =>
-      Effect.fail(
-        new StateStoreError({
-          message: e instanceof Error ? e.message : String(e),
-          cause: e instanceof Error ? e : undefined,
-        }),
-      ),
+      Effect.gen(function* () {
+        const command = yield* profileCommandHint("alchemy profile edit");
+        return yield* Effect.fail(
+          new StateStoreError({
+            message: describeStateStoreFailure(e, command),
+            http: HttpClientError.isHttpClientError(e)
+              ? { status: e.response?.status }
+              : e instanceof HttpApiError.Unauthorized
+                ? { status: 401 }
+                : undefined,
+          }),
+        );
+      }),
     ),
   ) as Effect.Effect<A, StateStoreError, R>;

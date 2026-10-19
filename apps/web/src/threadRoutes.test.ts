@@ -6,11 +6,22 @@ import { DraftId } from "./composerDraftStore";
 import {
   buildDraftThreadRouteParams,
   buildThreadRouteParams,
+  isThreadRoutePathname,
+  isThreadRouteSnapshotAuthoritative,
+  resolveActiveThreadRouteRef,
+  resolveThreadRouteRenderState,
   resolveThreadRouteRef,
   resolveThreadRouteTarget,
 } from "./threadRoutes";
 
 describe("threadRoutes", () => {
+  it("does not treat cached thread lists as authoritative for deep links", () => {
+    expect(isThreadRouteSnapshotAuthoritative("empty")).toBe(false);
+    expect(isThreadRouteSnapshotAuthoritative("cached")).toBe(false);
+    expect(isThreadRouteSnapshotAuthoritative("synchronizing")).toBe(false);
+    expect(isThreadRouteSnapshotAuthoritative("live")).toBe(true);
+  });
+
   it("builds canonical thread route params from a scoped ref", () => {
     const ref = scopeThreadRef("env-1" as never, ThreadId.make("thread-1"));
 
@@ -33,6 +44,19 @@ describe("threadRoutes", () => {
 
     expect(resolveThreadRouteRef({ environmentId: "env-1" })).toBeNull();
     expect(resolveThreadRouteRef({ threadId: "thread-1" })).toBeNull();
+  });
+
+  it("matches only the thread's own route pathname", () => {
+    const ref = scopeThreadRef("env-1" as never, ThreadId.make("thread-1"));
+
+    expect(isThreadRoutePathname("/env-1/thread-1", ref)).toBe(true);
+    expect(isThreadRoutePathname("/env-1/thread-1/", ref)).toBe(true);
+    // A pending navigation away from the thread already shows these locations.
+    expect(isThreadRoutePathname("/new", ref)).toBe(false);
+    expect(isThreadRoutePathname("/env-1/thread-2", ref)).toBe(false);
+    expect(isThreadRoutePathname("/env-2/thread-1", ref)).toBe(false);
+    expect(isThreadRoutePathname("/draft/thread-1", ref)).toBe(false);
+    expect(isThreadRoutePathname("/env-1/thread-1/extra", ref)).toBe(false);
   });
 
   it("builds canonical draft route params from a draft id", () => {
@@ -63,5 +87,122 @@ describe("threadRoutes", () => {
       kind: "draft",
       draftId: "draft-1",
     });
+  });
+
+  it("resolves the backing thread while a draft route is being promoted", () => {
+    const target = resolveThreadRouteTarget({ draftId: "draft-1" });
+
+    expect(
+      resolveActiveThreadRouteRef(target, {
+        environmentId: "env-1" as never,
+        threadId: ThreadId.make("draft-thread"),
+        promotedTo: scopeThreadRef("env-2" as never, ThreadId.make("server-thread")),
+      }),
+    ).toEqual({
+      environmentId: "env-2",
+      threadId: "server-thread",
+    });
+  });
+
+  it("does not treat a draft's reserved thread ref as an active sidebar thread", () => {
+    const target = resolveThreadRouteTarget({ draftId: "draft-1" });
+
+    expect(
+      resolveActiveThreadRouteRef(target, {
+        environmentId: "env-1" as never,
+        threadId: ThreadId.make("draft-thread"),
+        promotedTo: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("renders authoritative server-thread shells when bootstrap is complete", () => {
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: true,
+        serverThreadDeleted: false,
+        draftThreadExists: false,
+      }),
+    ).toBe("ready");
+  });
+
+  it("renders server threads and local drafts when they are ready", () => {
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: true,
+        serverThreadDeleted: false,
+        draftThreadExists: false,
+      }),
+    ).toBe("ready");
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: false,
+        serverThreadDeleted: false,
+        draftThreadExists: true,
+      }),
+    ).toBe("ready");
+  });
+
+  it.each([
+    { status: "cached", source: "server thread" },
+    { status: "synchronizing", source: "server thread" },
+    { status: "cached", source: "draft" },
+    { status: "synchronizing", source: "draft" },
+  ] as const)(
+    "keeps available $source visible while the shell is $status",
+    ({ status, source }) => {
+      expect(
+        resolveThreadRouteRenderState({
+          bootstrapComplete: isThreadRouteSnapshotAuthoritative(status),
+          serverThreadExists: source === "server thread",
+          serverThreadDeleted: false,
+          draftThreadExists: source === "draft",
+        }),
+      ).toBe("ready");
+    },
+  );
+
+  it("distinguishes bootstrap loading from a missing thread", () => {
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: false,
+        serverThreadExists: false,
+        serverThreadDeleted: false,
+        draftThreadExists: false,
+      }),
+    ).toBe("loading");
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: false,
+        serverThreadDeleted: false,
+        draftThreadExists: false,
+      }),
+    ).toBe("missing");
+  });
+
+  it("redirects deleted server threads", () => {
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: true,
+        serverThreadDeleted: true,
+        draftThreadExists: false,
+      }),
+    ).toBe("missing");
+  });
+
+  it("waits for the live shell before redirecting a deleted thread", () => {
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: isThreadRouteSnapshotAuthoritative("cached"),
+        serverThreadExists: true,
+        serverThreadDeleted: true,
+        draftThreadExists: false,
+      }),
+    ).toBe("loading");
   });
 });

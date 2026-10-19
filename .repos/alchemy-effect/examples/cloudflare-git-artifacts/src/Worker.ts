@@ -2,10 +2,10 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as Etag from "effect/unstable/http/Etag";
-import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
-import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as Etag from "effect/http/Etag";
+import * as HttpPlatform from "effect/http/HttpPlatform";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import {
   CloneToken,
   CreateRepoResponse,
@@ -29,15 +29,14 @@ const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
 export default class Worker extends Cloudflare.Worker<Worker>()(
   "Api",
   {
-    main: import.meta.filename,
+    main: import.meta.url,
     observability: { enabled: true },
     compatibility: {
-      flags: ["nodejs_compat"],
-      date: "2026-03-17",
+      date: "2026-08-31",
     },
   },
   Effect.gen(function* () {
-    const artifacts = yield* Cloudflare.Artifacts.bind(Repos);
+    const artifacts = yield* Repos;
     const repos = yield* Repo;
 
     const findRepo = (name: string) =>
@@ -170,5 +169,5 @@ export default class Worker extends Cloudflare.Worker<Worker>()(
         HttpRouter.toHttpEffect,
       ),
     };
-  }).pipe(Effect.provide(Layer.mergeAll(Cloudflare.ArtifactsBindingLive))),
+  }).pipe(Effect.provide(Layer.mergeAll(Binding))),
 ) {}

@@ -1,20 +1,20 @@
-import * as Haptics from "expo-haptics";
-import { SymbolView } from "expo-symbols";
-import { useCallback, useEffect, useRef } from "react";
-import { ActivityIndicator, Pressable, View } from "react-native";
-import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-
-import { AppText as Text } from "../../components/AppText";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
-import { useThemeColor } from "../../lib/useThemeColor";
+import * as Haptics from "expo-haptics";
+import { useEffect, useRef } from "react";
+import Animated, { FadeIn, FadeOut, ReduceMotion } from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Toast } from "../../components/ui/Toast";
+import { MOBILE_MOTION } from "../../lib/designTokens";
+import { APP_BAR_HEIGHT } from "../../lib/layoutMetrics";
 import type { GitActionProgress } from "../../state/use-vcs-action-state";
 
 export function GitActionProgressOverlay(props: {
   readonly progress: GitActionProgress;
   readonly onDismiss: () => void;
+  readonly onOpenPullRequest?: (url: string) => Promise<boolean>;
 }) {
   const { progress, onDismiss } = props;
+  const openPullRequest = props.onOpenPullRequest;
   const insets = useSafeAreaInsets();
   const prevPhaseRef = useRef(progress.phase);
 
@@ -29,15 +29,17 @@ export function GitActionProgressOverlay(props: {
     }
   }, [progress.phase]);
 
-  const handlePress = useCallback(() => {
+  const handlePress = () => {
     if (progress.prUrl) {
-      void tryOpenExternalUrl(progress.prUrl, "pull-request");
+      void (openPullRequest
+        ? openPullRequest(progress.prUrl)
+        : tryOpenExternalUrl(progress.prUrl, "pull-request"));
       return;
     }
     if (progress.phase === "success" || progress.phase === "error") {
       onDismiss();
     }
-  }, [onDismiss, progress.phase, progress.prUrl]);
+  };
 
   if (progress.phase === "idle") {
     return null;
@@ -45,78 +47,26 @@ export function GitActionProgressOverlay(props: {
 
   return (
     <Animated.View
-      entering={FadeIn.duration(200)}
-      exiting={FadeOut.duration(150)}
-      style={{ top: insets.top + 48, left: 12, right: 12, position: "absolute", zIndex: 100 }}
+      entering={FadeIn.duration(MOBILE_MOTION.enter).reduceMotion(ReduceMotion.System)}
+      exiting={FadeOut.duration(MOBILE_MOTION.exit).reduceMotion(ReduceMotion.System)}
+      className="absolute inset-x-3 z-[100]"
+      style={{ top: insets.top + APP_BAR_HEIGHT + 8 }}
       pointerEvents="box-none"
     >
-      <Pressable onPress={handlePress}>
-        <OverlayContent progress={progress} />
-      </Pressable>
+      <Toast
+        message={progress.label ?? "Source control"}
+        description={progress.description ?? undefined}
+        tone={
+          progress.phase === "error"
+            ? "danger"
+            : progress.phase === "success"
+              ? "success"
+              : "default"
+        }
+        busy={progress.phase === "running"}
+        action={progress.prUrl ? { label: "Open PR", onPress: handlePress } : undefined}
+        onDismiss={progress.phase === "running" ? undefined : onDismiss}
+      />
     </Animated.View>
   );
-}
-
-function OverlayContent(props: { readonly progress: GitActionProgress }) {
-  const { progress } = props;
-  const iconColor = useThemeColor("--color-icon");
-
-  const bgClass =
-    progress.phase === "error"
-      ? "bg-red-50 dark:bg-red-950/80 border-red-200 dark:border-red-800"
-      : "bg-card border-border";
-
-  return (
-    <View
-      className={`flex-row items-center gap-2.5 rounded-2xl border px-3.5 py-3 shadow-lg shadow-black/10 ${bgClass}`}
-    >
-      <OverlayIcon phase={progress.phase} iconColor={iconColor} />
-
-      <View className="flex-1 gap-0.5">
-        {progress.label ? (
-          <Text className="text-sm font-t3-bold text-foreground" numberOfLines={1}>
-            {progress.label}
-          </Text>
-        ) : null}
-        {progress.description ? (
-          <Text className="text-2xs text-foreground-muted" numberOfLines={1}>
-            {progress.description}
-          </Text>
-        ) : null}
-      </View>
-
-      {progress.prUrl ? (
-        <SymbolView name="arrow.up.right" size={13} tintColor={iconColor} type="monochrome" />
-      ) : null}
-    </View>
-  );
-}
-
-function OverlayIcon(props: {
-  readonly phase: GitActionProgress["phase"];
-  readonly iconColor: ReturnType<typeof useThemeColor>;
-}) {
-  switch (props.phase) {
-    case "running":
-      return <ActivityIndicator size="small" />;
-    case "success":
-      return (
-        <View className="h-6 w-6 items-center justify-center rounded-full bg-green-500">
-          <SymbolView name="checkmark" size={12} tintColor="white" type="monochrome" />
-        </View>
-      );
-    case "error":
-      return (
-        <View className="h-6 w-6 items-center justify-center rounded-full bg-red-500">
-          <SymbolView
-            name="exclamationmark.triangle"
-            size={12}
-            tintColor="white"
-            type="monochrome"
-          />
-        </View>
-      );
-    default:
-      return null;
-  }
 }

@@ -1,42 +1,12 @@
 /**
- * Worker-side entry point for SQLite WASM databases stored in the browser's
- * Origin Private File System (OPFS).
+ * Runs the worker side of the browser SQLite WASM client that stores data in
+ * OPFS.
  *
- * This module opens `@effect/wa-sqlite` with the OPFS access-handle VFS and
- * serves the message protocol used by the worker-backed SQLite WASM client.
- * Run it from a dedicated worker, or from a `SharedWorker` connection port, to
- * keep durable local SQLite storage off the main thread while preserving the
- * database in OPFS.
- *
- * **Mental model**
- *
- * - {@link run} owns one SQLite connection for one OPFS database name.
- * - The worker posts `ready` after opening the database and then handles the
- *   client protocol for SQL statements, import, export, update hooks, and
- *   close.
- * - The port in {@link OpfsWorkerConfig} is the only communication channel
- *   between the client and the worker loop.
- * - Closing the port, sending `close`, or interrupting the surrounding scope
- *   releases the SQLite database handle.
- *
- * **Common tasks**
- *
- * Use this module for local-first browser data, offline caches,
- * client-side migrations, and import/export workflows that need OPFS
- * durability. Start {@link run} in the worker script, then connect the
- * application through the worker-backed `SqliteClient` constructor.
- *
- * **Gotchas**
- *
- * OPFS requires browser support and a secure origin. Coordinate multiple tabs
- * or workers before opening or migrating the same database, because this module
- * owns a single connection and does not provide cross-tab locking. Close unused
- * ports so access handles are released promptly.
- *
- * **See also**
- *
- * - {@link OpfsWorkerConfig} for the required worker port and database name.
- * - {@link run} for starting the worker message loop.
+ * This module opens `@effect/wa-sqlite` with the OPFS access-handle VFS, then
+ * listens on a `MessagePort`-compatible port for the protocol used by
+ * `SqliteClient`. It sends a ready message, executes SQL messages, imports and
+ * exports database bytes, forwards update-hook notifications, and closes when
+ * requested. It is meant to run in a dedicated worker or a `SharedWorker`.
  *
  * @since 4.0.0
  */
@@ -46,7 +16,7 @@ import * as WaSqlite from "@effect/wa-sqlite"
 import SQLiteESMFactory from "@effect/wa-sqlite/dist/wa-sqlite.mjs"
 import { AccessHandlePoolVFS } from "@effect/wa-sqlite/src/examples/AccessHandlePoolVFS.js"
 import * as Effect from "effect/Effect"
-import { classifySqliteError, SqlError } from "effect/unstable/sql/SqlError"
+import { classifySqliteError, SqlError } from "effect/sql/SqlError"
 import type { OpfsWorkerMessage } from "./internal/opfsWorker.ts"
 
 const classifyError = (cause: unknown, message: string, operation: string) =>
@@ -59,14 +29,14 @@ const classifyError = (cause: unknown, message: string, operation: string) =>
  * @since 4.0.0
  */
 export interface OpfsWorkerConfig {
-  readonly port: EventTarget & Pick<MessagePort, "postMessage" | "close">
+  readonly port: EventTarget & Pick<MessagePort, "postMessage" | "close"> & Partial<Pick<MessagePort, "start">>
   readonly dbName: string
 }
 
 /**
  * Runs the SQLite OPFS worker loop, opening the configured database, posting a ready message, handling query/import/export/update-hook messages, and closing when a close message is received.
  *
- * @category constructors
+ * @category running
  * @since 4.0.0
  */
 export const run = (
@@ -75,7 +45,10 @@ export const run = (
   Effect.gen(function*() {
     const factory = yield* Effect.promise(() => SQLiteESMFactory())
     const sqlite3 = WaSqlite.Factory(factory)
-    const vfs = yield* Effect.promise(() => AccessHandlePoolVFS.create("opfs", factory))
+    const vfs = yield* Effect.acquireRelease(
+      Effect.promise(() => AccessHandlePoolVFS.create("opfs", factory)),
+      (vfs) => Effect.promise(() => vfs.close())
+    )
     sqlite3.vfs_register(vfs, false)
     const db = yield* Effect.acquireRelease(
       Effect.try({
@@ -121,13 +94,15 @@ export const run = (
               const [id, sql, params] = message
               messageId = id
               const results: Array<any> = []
-              let columns: Array<string> | undefined
+              const columns: Array<Array<string>> = []
               for (const stmt of sqlite3.statements(db, sql)) {
+                let statementColumns: Array<string> | undefined
                 sqlite3.bind_collection(stmt, params as any)
                 while (sqlite3.step(stmt) === WaSqlite.SQLITE_ROW) {
-                  columns = columns ?? sqlite3.column_names(stmt)
+                  statementColumns = statementColumns ?? sqlite3.column_names(stmt)
                   const row = sqlite3.row(stmt)
                   results.push(row)
+                  columns.push(statementColumns)
                 }
               }
               options.port.postMessage([id, undefined, [columns, results]])
@@ -136,10 +111,12 @@ export const run = (
           }
         } catch (e: any) {
           const message = "message" in e ? e.message : String(e)
-          options.port.postMessage([messageId!, message, undefined])
+          const error = typeof e.code === "number" ? { message, code: e.code } : message
+          options.port.postMessage([messageId!, error, undefined])
         }
       }
       options.port.addEventListener("message", onMessage)
+      options.port.start?.()
       options.port.postMessage(["ready", undefined, undefined])
       return Effect.sync(() => {
         options.port.removeEventListener("message", onMessage)

@@ -5,38 +5,12 @@
  * groups of work compete for the same bounded resource and each group should
  * make progress without one busy group monopolizing released permits.
  *
- * **Mental model**
- *
- * - The semaphore has a fixed shared capacity measured in permits
- * - Work acquires permits with a partition key of type `K`
- * - Waiting acquisitions are tracked per partition
- * - Released permits are assigned to waiting partitions in round-robin order
- * - `withPermit` and `withPermits` acquire permits around an effect and
- *   release them when the effect exits, fails, or is interrupted
- *
- * **Common tasks**
- *
- * - Create a semaphore: {@link make}, {@link makeUnsafe}
- * - Inspect capacity and availability: {@link capacity}, {@link available}
- * - Acquire and release manually: {@link take}, {@link release}
- * - Limit a single operation per partition: {@link withPermit}
- * - Limit weighted work per partition: {@link withPermits}
- * - Run only when permits are immediately available:
- *   {@link withPermitsIfAvailable}
- *
- * **Gotchas**
- *
- * - `withPermitsIfAvailable` does not use a partition key; it only succeeds
- *   when the shared pool has enough permits immediately
- * - Acquiring more permits than the semaphore capacity never completes
- * - Requests for zero or negative permits complete without acquiring anything
- * - Non-finite capacities create an unbounded semaphore whose acquire and
- *   release operations complete immediately
- *
  * @since 4.0.0
  */
 import * as Effect from "./Effect.ts"
+import * as Exit from "./Exit.ts"
 import { dual } from "./Function.ts"
+import * as internalEffect from "./internal/effect.ts"
 import * as MutableHashMap from "./MutableHashMap.ts"
 import * as Option from "./Option.ts"
 
@@ -126,8 +100,8 @@ export interface Partitioned<in K> extends PartitionedSemaphore<K> {}
  *
  * **When to use**
  *
- * Use when a partitioned semaphore must be constructed synchronously outside an
- * `Effect` workflow.
+ * Use when you need to construct a partitioned semaphore synchronously outside
+ * an `Effect` workflow.
  *
  * **Details**
  *
@@ -208,57 +182,64 @@ export const makeUnsafe = <K = unknown>(options: {
       return Effect.void
     }
 
-    return Effect.callback<void>((resume) => {
-      if (maxPermits < permits) {
-        resume(Effect.never)
-        return
-      }
+    if (maxPermits < permits) {
+      return Effect.never
+    }
 
+    return Effect.withFiber((fiber) => {
       if (totalPermits >= permits) {
+        // Keep the capacity check, deduction, and interruption cleanup in one evaluation step.
         totalPermits -= permits
-        resume(Effect.void)
-        return
+        internalEffect.onExitUnsafe(fiber, (exit) => {
+          if (Exit.isFailure(exit)) {
+            releaseUnsafe(permits)
+          }
+          return undefined
+        })
+        return Effect.void
       }
 
-      const needed = permits - totalPermits
-      const taken = permits - needed
-      if (totalPermits > 0) {
-        totalPermits = 0
-      }
-      waitingPermits += needed
-
-      const waiters = Option.getOrElse(
-        MutableHashMap.get(partitions, key),
-        () => {
-          const set = new Set<Waiter>()
-          MutableHashMap.set(partitions, key, set)
-          return set
+      return Effect.callback<void>((resume) => {
+        if (totalPermits >= permits) {
+          resume(take(key, permits))
+          return
         }
-      )
+        const needed = permits - totalPermits
+        if (totalPermits > 0) {
+          totalPermits = 0
+        }
+        waitingPermits += needed
 
-      const entry: Waiter = {
-        permits: needed,
-        resume: () => {
+        const waiters = Option.getOrElse(
+          MutableHashMap.get(partitions, key),
+          () => {
+            const set = new Set<Waiter>()
+            MutableHashMap.set(partitions, key, set)
+            return set
+          }
+        )
+
+        const entry: Waiter = {
+          permits: needed,
+          resume: () => {
+            cleanup()
+            resume(Effect.void)
+          }
+        }
+
+        const cleanup = () => {
+          if (waiters.delete(entry) && waiters.size === 0) {
+            MutableHashMap.remove(partitions, key)
+          }
+        }
+
+        waiters.add(entry)
+
+        return Effect.sync(() => {
           cleanup()
-          resume(Effect.void)
-        }
-      }
-
-      const cleanup = () => {
-        waiters.delete(entry)
-        if (waiters.size === 0) {
-          MutableHashMap.remove(partitions, key)
-        }
-      }
-
-      waiters.add(entry)
-
-      return Effect.sync(() => {
-        cleanup()
-        waitingPermits -= entry.permits
-        if (taken > 0) {
-          releaseUnsafe(taken)
-        }
+          waitingPermits -= entry.permits
+          releaseUnsafe(permits - entry.permits)
+        })
       })
     })
   }
@@ -311,17 +292,17 @@ export const makeUnsafe = <K = unknown>(options: {
           return Effect.asSome(effect)
         }
 
-        return Effect.suspend(() => {
+        return Effect.withFiber((fiber) => {
           if (!tryTake(permits)) {
             return Effect.succeed(Option.none())
           }
 
-          return Effect.ensuring(
-            Effect.asSome(effect),
-            Effect.sync(() => {
-              releaseUnsafe(permits)
-            })
-          )
+          // Register cleanup before the fiber can yield to the user effect.
+          internalEffect.onExitUnsafe(fiber, () => {
+            releaseUnsafe(permits)
+            return undefined
+          })
+          return Effect.asSome(effect)
         })
       }
   }
@@ -405,8 +386,8 @@ export const capacity = <K>(self: PartitionedSemaphore<K>): number => self.capac
  *
  * **When to use**
  *
- * Use to manually acquire permits for a partition when acquisition and release
- * must be controlled as separate effects.
+ * Use when you need manual permit acquisition for a partition and want to
+ * control acquisition and release as separate effects.
  *
  * **Details**
  *
@@ -437,8 +418,8 @@ export const take: {
  *
  * **When to use**
  *
- * Use to manually return permits acquired with `take` when a lower-level
- * partitioned permit protocol needs explicit release control.
+ * Use when you need to return permits acquired with `take` in a lower-level
+ * partitioned permit protocol with explicit release control.
  *
  * **Details**
  *

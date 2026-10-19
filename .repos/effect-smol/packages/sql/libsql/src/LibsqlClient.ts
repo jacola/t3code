@@ -1,37 +1,11 @@
 /**
  * libSQL adapter for Effect SQL, backed by `@libsql/client`.
  *
- * Use this module to provide a {@link LibsqlClient} and the generic SQL client
- * service for Turso-hosted libSQL databases, local `file:` databases, embedded
- * replicas, migrations, tests, and server code that wants SQLite-compatible SQL
- * through Effect layers. The client uses Effect SQL's SQLite compiler and
- * classifies libSQL and SQLite failures as `SqlError`s.
- *
- * ## Mental model
- *
- * {@link make} and {@link layer} either create a scoped libSQL SDK client from
- * connection options or wrap a caller-owned client supplied with `liveClient`.
- * The Effect client serializes access to the underlying client because a libSQL
- * transaction is tied to that client. A top-level `withTransaction` opens a
- * write transaction, and nested transactions use SQLite savepoints.
- *
- * ## Common tasks
- *
- * - Use {@link layer} with concrete connection options, or {@link layerConfig}
- *   when the options should come from `Config`.
- * - Use a `file:` URL for local SQLite-compatible storage, a remote libSQL or
- *   Turso URL for hosted databases, and `syncUrl` for embedded replicas.
- * - Use `liveClient` when another component owns the `@libsql/client` instance
- *   and its lifetime.
- * - Use `transformQueryNames` and `transformResultNames` to map between Effect
- *   field names and database column names.
- *
- * ## Gotchas
- *
- * Direct calls made through the raw SDK client are not coordinated with Effect
- * SQL transactions. Remote transactions should stay short because they reserve
- * the client until commit or rollback. Row streaming is not implemented by this
- * adapter.
+ * This module provides a {@link LibsqlClient} and the generic SQL client
+ * service for `@libsql/client`. It uses Effect SQL's SQLite compiler, supports
+ * managed SDK clients or caller-owned live clients, classifies libSQL and
+ * SQLite failures as `SqlError`s, and provides transaction support with
+ * savepoints. Streaming queries are not implemented by this driver.
  *
  * @since 4.0.0
  */
@@ -39,17 +13,18 @@ import * as Libsql from "@libsql/client"
 import * as Config from "effect/Config"
 import * as Context from "effect/Context"
 import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
 import * as Layer from "effect/Layer"
 import * as Option from "effect/Option"
+import * as Reactivity from "effect/reactivity/Reactivity"
 import * as Redacted from "effect/Redacted"
 import * as Scope from "effect/Scope"
 import * as Semaphore from "effect/Semaphore"
+import * as Client from "effect/sql/SqlClient"
+import type { Connection } from "effect/sql/SqlConnection"
+import { classifySqliteError, SqlError } from "effect/sql/SqlError"
+import * as Statement from "effect/sql/Statement"
 import * as Stream from "effect/Stream"
-import * as Reactivity from "effect/unstable/reactivity/Reactivity"
-import * as Client from "effect/unstable/sql/SqlClient"
-import type { Connection } from "effect/unstable/sql/SqlConnection"
-import { classifySqliteError, SqlError } from "effect/unstable/sql/SqlError"
-import * as Statement from "effect/unstable/sql/Statement"
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name"
 
@@ -75,7 +50,7 @@ export type TypeId = "~@effect/sql-libsql/LibsqlClient"
 /**
  * libSQL-backed SQL client service, extending `SqlClient` with its runtime type marker and client configuration.
  *
- * @category models
+ * @category services
  * @since 4.0.0
  */
 export interface LibsqlClient extends Client.SqlClient {
@@ -90,14 +65,12 @@ export interface LibsqlClient extends Client.SqlClient {
  *
  * Use to access or provide a libSQL client through the Effect context.
  *
- * @category tags
+ * @category services
  * @since 4.0.0
  */
 export const LibsqlClient = Context.Service<LibsqlClient>("@effect/sql-libsql/LibsqlClient")
 
-const LibsqlTransaction = Context.Service<readonly [LibsqlConnection, counter: number]>(
-  "@effect/sql-libsql/LibsqlClient/LibsqlTransaction"
-)
+let clientIdCounter = 0
 
 /**
  * Configuration for a libSQL client, either by supplying connection options or an existing live libSQL client.
@@ -186,6 +159,7 @@ export declare namespace LibsqlClientConfig {
   /**
    * Configuration that uses an existing libSQL client. The supplied `liveClient` is caller-owned and is not closed by the Effect client.
    *
+   * @stability unstable
    * @category models
    * @since 4.0.0
    */
@@ -210,6 +184,9 @@ export const make = (
   options: LibsqlClientConfig
 ): Effect.Effect<LibsqlClient, never, Scope.Scope | Reactivity.Reactivity> =>
   Effect.gen(function*() {
+    const LibsqlTransaction = Context.Service<readonly [LibsqlConnection, counter: number]>(
+      `@effect/sql-libsql/LibsqlClient/LibsqlTransaction/${clientIdCounter++}`
+    )
     const compiler = Statement.makeCompilerSqlite(options.transformQueryNames)
     const transformRows = options.transformResultNames ?
       Statement.defaultTransforms(
@@ -265,6 +242,9 @@ export const make = (
       }
       executeValues(sql: string, params: ReadonlyArray<unknown>) {
         return Effect.map(this.run(sql, params), (rows) => rows.map((row) => Array.from(row) as Array<any>))
+      }
+      executeValuesUnprepared(sql: string, params: ReadonlyArray<unknown>) {
+        return this.executeValues(sql, params)
       }
       executeUnprepared(
         sql: string,
@@ -334,11 +314,14 @@ export const make = (
         const scope = Scope.makeUnsafe()
         yield* restore(semaphore.take(1))
         yield* Scope.addFinalizer(scope, semaphore.release(1))
-        const conn = yield* connection.beginTransaction
+        const conn = yield* connection.beginTransaction.pipe(
+          Effect.tapCause((cause) => Scope.close(scope, Exit.failCause(cause)))
+        )
         return [scope, conn] as const
       })),
       begin: () => Effect.void, // already begun in acquireConnection
       savepoint: (conn, id) => conn.executeRaw(`SAVEPOINT effect_sql_${id};`, []),
+      releaseSavepoint: (conn, id) => conn.executeRaw(`RELEASE SAVEPOINT effect_sql_${id};`, []),
       commit: (conn) => conn.commit,
       rollback: (conn) => conn.rollback,
       rollbackSavepoint: (conn, id) => conn.executeRaw(`ROLLBACK TO SAVEPOINT effect_sql_${id};`, [])
@@ -355,6 +338,7 @@ export const make = (
     return Object.assign(
       yield* Client.make({
         acquirer,
+        transactionService: LibsqlTransaction as any,
         compiler,
         spanAttributes,
         transformRows

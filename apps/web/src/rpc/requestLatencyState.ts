@@ -1,10 +1,16 @@
 import { useAtomValue } from "@effect/atom-react";
 import { WS_METHODS } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import { appAtomRegistry } from "./atomRegistry";
 
 export const SLOW_RPC_ACK_THRESHOLD_MS = 15_000;
+/**
+ * Some requests are slow by design — they shell out to a package manager on the
+ * server and only respond once the install finishes. Warning about those after
+ * 15s is noise, so they get a much longer leash.
+ */
+export const LONG_RUNNING_RPC_ACK_THRESHOLD_MS = 120_000;
 export const MAX_TRACKED_RPC_ACK_REQUESTS = 256;
 let slowRpcAckThresholdMs = SLOW_RPC_ACK_THRESHOLD_MS;
 
@@ -22,7 +28,12 @@ interface PendingRpcAckRequest {
 }
 
 const pendingRpcAckRequests = new Map<string, PendingRpcAckRequest>();
-const untrackedRpcAckTags = new Set<string>([WS_METHODS.previewAutomationConnect]);
+const untrackedRpcAckMethods = new Set<string>([WS_METHODS.serverGetUsageSummary]);
+const longRunningRpcAckMethods = new Set<string>([
+  WS_METHODS.serverUpdateProvider,
+  WS_METHODS.serverRefreshProviders,
+  WS_METHODS.serverUpdateServer,
+]);
 
 const slowRpcAckRequestsAtom = Atom.make<ReadonlyArray<SlowRpcAckRequest>>([]).pipe(
   Atom.keepAlive,
@@ -37,16 +48,26 @@ function getSlowRpcAckRequestsValue(): ReadonlyArray<SlowRpcAckRequest> {
   return appAtomRegistry.get(slowRpcAckRequestsAtom);
 }
 
-function shouldTrackRpcAck(tag: string): boolean {
-  return !tag.includes("subscribe") && !untrackedRpcAckTags.has(tag);
+function shouldTrackRpcAck(method: string): boolean {
+  return (
+    !method.includes("subscribe") &&
+    !method.startsWith("pullRequests.") &&
+    !untrackedRpcAckMethods.has(method)
+  );
+}
+
+function rpcAckThresholdMs(method: string): number {
+  return longRunningRpcAckMethods.has(method)
+    ? Math.max(slowRpcAckThresholdMs, LONG_RUNNING_RPC_ACK_THRESHOLD_MS)
+    : slowRpcAckThresholdMs;
 }
 
 export function getSlowRpcAckRequests(): ReadonlyArray<SlowRpcAckRequest> {
   return getSlowRpcAckRequestsValue();
 }
 
-export function trackRpcRequestSent(requestId: string, tag: string): void {
-  if (!shouldTrackRpcAck(tag)) {
+export function trackRpcRequestSent(requestId: string, method: string, tag = method): void {
+  if (!shouldTrackRpcAck(method)) {
     return;
   }
 
@@ -54,17 +75,18 @@ export function trackRpcRequestSent(requestId: string, tag: string): void {
   evictOldestPendingRpcRequestIfNeeded();
 
   const startedAtMs = Date.now();
+  const thresholdMs = rpcAckThresholdMs(method);
   const request: SlowRpcAckRequest = {
     requestId,
     startedAt: new Date(startedAtMs).toISOString(),
     startedAtMs,
     tag,
-    thresholdMs: slowRpcAckThresholdMs,
+    thresholdMs,
   };
   const timeoutId = setTimeout(() => {
     pendingRpcAckRequests.delete(requestId);
     appendSlowRpcAckRequest(request);
-  }, slowRpcAckThresholdMs);
+  }, thresholdMs);
 
   pendingRpcAckRequests.set(requestId, {
     request,
@@ -82,7 +104,7 @@ export function acknowledgeRpcRequest(requestId: string): void {
   setSlowRpcAckRequests(slowRequests.filter((request) => request.requestId !== requestId));
 }
 
-export function clearAllTrackedRpcRequests(): void {
+function clearAllTrackedRpcRequests(): void {
   for (const pending of pendingRpcAckRequests.values()) {
     clearTimeout(pending.timeoutId);
   }
@@ -124,10 +146,6 @@ function evictOldestPendingRpcRequestIfNeeded(): void {
 export function resetRequestLatencyStateForTests(): void {
   slowRpcAckThresholdMs = SLOW_RPC_ACK_THRESHOLD_MS;
   clearAllTrackedRpcRequests();
-}
-
-export function setSlowRpcAckThresholdMsForTests(thresholdMs: number): void {
-  slowRpcAckThresholdMs = thresholdMs;
 }
 
 export function useSlowRpcAckRequests(): ReadonlyArray<SlowRpcAckRequest> {

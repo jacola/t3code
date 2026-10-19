@@ -3,56 +3,129 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import { LegendList } from "@legendapp/list/react-native";
-import type { EnvironmentId } from "@t3tools/contracts";
-import type { MenuAction } from "@react-native-menu/menu";
-import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
-import { SymbolView } from "expo-symbols";
-import { useCallback, useMemo, useRef, type ComponentProps } from "react";
 import {
-  ActivityIndicator,
-  Platform,
-  Pressable,
-  RefreshControl,
-  useWindowDimensions,
-  View,
-} from "react-native";
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
+  AuthOrchestrationOperateScope,
+  type EnvironmentId,
+  type EnvironmentMachineKind,
+  resolveEnvironmentMachineKind,
+} from "@t3tools/contracts";
+import { useNavigation } from "@react-navigation/native";
+import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
+import { AppBar } from "../../components/ui/AppBar";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { useCallback, useMemo, useRef, type ComponentProps } from "react";
+import { Platform, Pressable, RefreshControl, useWindowDimensions, View } from "react-native";
+import { GestureDetector, useNativeGesture } from "react-native-gesture-handler";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 
-import { AppText as Text } from "../../components/AppText";
-import { ControlPillMenu } from "../../components/ControlPill";
-import { EmptyState } from "../../components/EmptyState";
+import { AppText as Text } from "../../components/ui/AppText";
+import { EmptyState } from "../../components/ui/EmptyState";
+import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { relativeTime } from "../../lib/time";
-import { useThemeColor } from "../../lib/useThemeColor";
+import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import { useServerConfigs } from "../../state/entities";
+import { useEnvironmentScope } from "../../state/session";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
-import { createNativeMailSearchToolbarItem } from "../layout/native-mail-search-toolbar";
 import type { ArchivedThreadGroup, ArchivedThreadSortOrder } from "./archivedThreadList";
+import { SettingsScreenContent } from "../settings/components/SettingsScreen";
 
 export interface ArchivedThreadsHeaderEnvironment {
   readonly environmentId: EnvironmentId;
   readonly label: string;
 }
 
-const THREAD_ACTIONS: MenuAction[] = [
-  {
-    id: "unarchive",
-    title: "Unarchive",
-    image: "arrow.uturn.backward",
-  },
-  {
-    id: "delete",
-    title: "Delete",
-    image: "trash",
-    attributes: { destructive: true },
-  },
-];
+function ArchivedThreadsHeader(props: {
+  readonly environments: ReadonlyArray<ArchivedThreadsHeaderEnvironment>;
+  readonly searchQuery: string;
+  readonly selectedEnvironmentId: EnvironmentId | null;
+  readonly sortOrder: ArchivedThreadSortOrder;
+  readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
+  readonly onRefresh: () => void;
+  readonly onSearchQueryChange: (query: string) => void;
+  readonly onSortOrderChange: (sortOrder: ArchivedThreadSortOrder) => void;
+}) {
+  const navigation = useNavigation();
+  const { width } = useWindowDimensions();
+  const hasCustomFilter = props.selectedEnvironmentId !== null || props.sortOrder !== "newest";
+  return (
+    <AppBar
+      title="Archived threads"
+      sidebar={false}
+      onBack={() => navigation.goBack()}
+      search={{
+        value: props.searchQuery,
+        onChangeText: props.onSearchQueryChange,
+        placeholder: "Search archived threads",
+        compactPlaceholder: "Search",
+        mode: "inline",
+        compactToolbar: width < 700,
+      }}
+      menus={[
+        {
+          title: "Archived thread options",
+          icon: hasCustomFilter
+            ? "line.3.horizontal.decrease.circle.fill"
+            : "line.3.horizontal.decrease.circle",
+          items: [
+            {
+              id: "environment",
+              title: "Environment",
+              items: [
+                {
+                  id: "environment:all",
+                  title: "All environments",
+                  selected: props.selectedEnvironmentId === null,
+                  onPress: () => props.onEnvironmentChange(null),
+                },
+                ...props.environments.map((environment) => ({
+                  id: `environment:${environment.environmentId}`,
+                  title: environment.label,
+                  selected: props.selectedEnvironmentId === environment.environmentId,
+                  onPress: () => props.onEnvironmentChange(environment.environmentId),
+                })),
+              ],
+            },
+            {
+              id: "sort",
+              title: "Sort by archived date",
+              items: [
+                {
+                  id: "sort:newest",
+                  title: "Newest first",
+                  selected: props.sortOrder === "newest",
+                  onPress: () => props.onSortOrderChange("newest"),
+                },
+                {
+                  id: "sort:oldest",
+                  title: "Oldest first",
+                  selected: props.sortOrder === "oldest",
+                  onPress: () => props.onSortOrderChange("oldest"),
+                },
+              ],
+            },
+            ...(Platform.OS === "android"
+              ? [
+                  {
+                    id: "refresh",
+                    title: "Refresh archived threads",
+                    onPress: props.onRefresh,
+                  },
+                ]
+              : []),
+          ],
+        },
+      ]}
+    />
+  );
+}
 
 type ArchivedThreadListItem =
   | {
       readonly kind: "project";
       readonly key: string;
       readonly environmentLabel: string | null;
+      readonly environmentMachine: EnvironmentMachineKind;
       readonly project: EnvironmentProject;
     }
   | {
@@ -64,196 +137,38 @@ type ArchivedThreadListItem =
       readonly thread: EnvironmentThreadShell;
     };
 
-function ArchivedThreadsHeader(props: {
-  readonly environments: ReadonlyArray<ArchivedThreadsHeaderEnvironment>;
-  readonly selectedEnvironmentId: EnvironmentId | null;
-  readonly sortOrder: ArchivedThreadSortOrder;
-  readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
-  readonly onRefresh: () => void;
-  readonly onSearchQueryChange: (query: string) => void;
-  readonly onSortOrderChange: (sortOrder: ArchivedThreadSortOrder) => void;
-}) {
-  const { width } = useWindowDimensions();
-  const hasCustomFilter = props.selectedEnvironmentId !== null || props.sortOrder !== "newest";
-  const usesNativeChrome = Platform.OS === "ios";
-  const usesCompactMailToolbar = Platform.OS === "ios" && width < 700;
-  const archiveFilterMenu = {
-    title: "Archived thread options",
-    items: [
-      {
-        type: "submenu" as const,
-        title: "Environment",
-        items: [
-          {
-            type: "action" as const,
-            title: "All environments",
-            state: props.selectedEnvironmentId === null ? ("on" as const) : ("off" as const),
-            onPress: () => props.onEnvironmentChange(null),
-          },
-          ...props.environments.map((environment) => ({
-            type: "action" as const,
-            title: environment.label,
-            state:
-              props.selectedEnvironmentId === environment.environmentId
-                ? ("on" as const)
-                : ("off" as const),
-            onPress: () => props.onEnvironmentChange(environment.environmentId),
-          })),
-        ],
-      },
-      {
-        type: "submenu" as const,
-        title: "Sort by archived date",
-        items: [
-          {
-            type: "action" as const,
-            title: "Newest first",
-            state: props.sortOrder === "newest" ? ("on" as const) : ("off" as const),
-            onPress: () => props.onSortOrderChange("newest"),
-          },
-          {
-            type: "action" as const,
-            title: "Oldest first",
-            state: props.sortOrder === "oldest" ? ("on" as const) : ("off" as const),
-            onPress: () => props.onSortOrderChange("oldest"),
-          },
-        ],
-      },
-    ],
-  };
-
-  return (
-    <>
-      {/* Static header config (glass preset + title) lives in Stack.tsx; only
-          dynamic toolbar/search wiring is set here. */}
-      <NativeStackScreenOptions
-        options={{
-          unstable_headerToolbarItems: usesCompactMailToolbar
-            ? () => [
-                createNativeMailSearchToolbarItem({
-                  composeButtonId: "archived-refresh",
-                  composeSystemImageName: "arrow.clockwise",
-                  filterMenu: archiveFilterMenu,
-                  filterButtonId: "archived-filter",
-                  filterSystemImageName: hasCustomFilter
-                    ? "line.3.horizontal.decrease.circle.fill"
-                    : "line.3.horizontal.decrease",
-                  onComposePress: props.onRefresh,
-                  onSearchTextChange: props.onSearchQueryChange,
-                  placeholder: "Search",
-                  searchTextChangeId: "archived-search-text",
-                }),
-              ]
-            : undefined,
-          headerSearchBarOptions: usesCompactMailToolbar
-            ? undefined
-            : {
-                ...(usesNativeChrome
-                  ? {
-                      allowToolbarIntegration: true,
-                      placement: "integratedButton" as const,
-                    }
-                  : {
-                      placement: "stacked" as const,
-                    }),
-                autoCapitalize: "none",
-                hideNavigationBar: false,
-                obscureBackground: false,
-                placeholder: "Search archived threads",
-                onChangeText: (event) => {
-                  props.onSearchQueryChange(event.nativeEvent.text);
-                },
-                onCancelButtonPress: () => {
-                  props.onSearchQueryChange("");
-                },
-              },
-        }}
-      />
-
-      {usesCompactMailToolbar ? null : (
-        <NativeHeaderToolbar placement="right">
-          {usesNativeChrome ? (
-            <NativeHeaderToolbar.Button
-              accessibilityLabel="Refresh archived threads"
-              icon="arrow.clockwise"
-              onPress={props.onRefresh}
-              separateBackground
-            />
-          ) : null}
-          <NativeHeaderToolbar.Menu
-            accessibilityLabel="Filter and sort archived threads"
-            icon={
-              hasCustomFilter
-                ? "line.3.horizontal.decrease.circle.fill"
-                : "line.3.horizontal.decrease.circle"
-            }
-            separateBackground
-            title="Archived thread options"
-          >
-            <NativeHeaderToolbar.Menu title="Environment">
-              <NativeHeaderToolbar.Label>Environment</NativeHeaderToolbar.Label>
-              <NativeHeaderToolbar.MenuAction
-                isOn={props.selectedEnvironmentId === null}
-                onPress={() => props.onEnvironmentChange(null)}
-              >
-                <NativeHeaderToolbar.Label>All environments</NativeHeaderToolbar.Label>
-              </NativeHeaderToolbar.MenuAction>
-              {props.environments.map((environment) => (
-                <NativeHeaderToolbar.MenuAction
-                  key={environment.environmentId}
-                  isOn={props.selectedEnvironmentId === environment.environmentId}
-                  onPress={() => props.onEnvironmentChange(environment.environmentId)}
-                >
-                  <NativeHeaderToolbar.Label>{environment.label}</NativeHeaderToolbar.Label>
-                </NativeHeaderToolbar.MenuAction>
-              ))}
-            </NativeHeaderToolbar.Menu>
-
-            <NativeHeaderToolbar.Menu title="Sort by archived date">
-              <NativeHeaderToolbar.Label>Sort by archived date</NativeHeaderToolbar.Label>
-              <NativeHeaderToolbar.MenuAction
-                isOn={props.sortOrder === "newest"}
-                onPress={() => props.onSortOrderChange("newest")}
-              >
-                <NativeHeaderToolbar.Label>Newest first</NativeHeaderToolbar.Label>
-              </NativeHeaderToolbar.MenuAction>
-              <NativeHeaderToolbar.MenuAction
-                isOn={props.sortOrder === "oldest"}
-                onPress={() => props.onSortOrderChange("oldest")}
-              >
-                <NativeHeaderToolbar.Label>Oldest first</NativeHeaderToolbar.Label>
-              </NativeHeaderToolbar.MenuAction>
-            </NativeHeaderToolbar.Menu>
-          </NativeHeaderToolbar.Menu>
-        </NativeHeaderToolbar>
-      )}
-    </>
-  );
-}
-
 function ProjectGroupLabel(props: {
   readonly environmentLabel: string | null;
+  readonly environmentMachine: EnvironmentMachineKind;
   readonly project: EnvironmentProject;
 }) {
   return (
     <View className="flex-row items-center gap-2.5 px-1 pb-2">
       <ProjectFavicon
         environmentId={props.project.environmentId}
+        faviconPath={props.project.faviconPath}
+        projectIcon={props.project.projectIcon}
         projectTitle={props.project.title}
         size={18}
         workspaceRoot={props.project.workspaceRoot}
       />
       <Text
-        className="flex-1 text-xs font-t3-medium uppercase text-foreground-muted"
+        className="flex-1 text-xs font-t3-medium tracking-[0.5px] uppercase text-foreground-muted"
         numberOfLines={1}
-        style={{ letterSpacing: 0.5 }}
       >
         {props.project.title}
       </Text>
       {props.environmentLabel ? (
-        <Text className="max-w-[42%] text-2xs text-foreground-tertiary" numberOfLines={1}>
-          {props.environmentLabel}
-        </Text>
+        <View className="max-w-[42%] flex-row items-center gap-1">
+          <EnvironmentMachineSymbol
+            kind={props.environmentMachine}
+            size={10}
+            tintColorClassName="accent-foreground-tertiary"
+          />
+          <Text className="shrink text-2xs text-foreground-tertiary" numberOfLines={1}>
+            {props.environmentLabel}
+          </Text>
+        </View>
       ) : null}
     </View>
   );
@@ -266,34 +181,79 @@ function ArchivedThreadRow(props: {
   readonly onDelete: () => void;
   readonly onSwipeableClose: (methods: SwipeableMethods) => void;
   readonly onSwipeableWillOpen: (methods: SwipeableMethods) => void;
-  readonly simultaneousSwipeGesture?: ComponentProps<
-    typeof ThreadSwipeable
-  >["simultaneousWithExternalGesture"];
+  readonly simultaneousSwipeGesture?: ComponentProps<typeof ThreadSwipeable>["simultaneousWith"];
   readonly onUnarchive: () => void;
   readonly thread: EnvironmentThreadShell;
 }) {
   const { width: windowWidth } = useWindowDimensions();
-  const cardColor = useThemeColor("--color-card");
-  const iconColor = useThemeColor("--color-icon-subtle");
-  const separatorColor = useThemeColor("--color-separator");
+  const cardColor = useUniwindTheme()["--color-grouped-card"];
+  const canOperateThread = useEnvironmentScope(
+    props.thread.environmentId,
+    AuthOrchestrationOperateScope,
+  );
   const timestamp = relativeTime(props.thread.archivedAt ?? props.thread.updatedAt);
   const subtitle = [props.environmentLabel, props.thread.branch].filter((part): part is string =>
     Boolean(part),
   );
-  const handleMenuAction = useCallback(
-    (event: { nativeEvent: { event: string } }) => {
-      if (event.nativeEvent.event === "unarchive") {
-        props.onUnarchive();
-      } else if (event.nativeEvent.event === "delete") {
-        props.onDelete();
-      }
-    },
-    [props.onDelete, props.onUnarchive],
+  const rowContent = (
+    <View
+      className={`flex-row items-center gap-3 bg-grouped-card px-4 py-3 ${props.isLast ? "" : "border-b border-separator"}`}
+    >
+      <View className="h-[34px] w-[34px] items-center justify-center rounded-[11px] bg-subtle">
+        <SymbolView
+          name="archivebox.fill"
+          size={15}
+          tintColorClassName="accent-icon-subtle"
+          type="monochrome"
+        />
+      </View>
+
+      <View className="min-w-0 flex-1 gap-1">
+        <View className="flex-row items-center gap-2">
+          <Text
+            className="min-w-0 flex-1 text-base font-t3-bold leading-snug text-foreground"
+            numberOfLines={1}
+          >
+            {props.thread.title}
+          </Text>
+          <Text className="min-w-[30px] text-right text-xs tabular-nums text-foreground-tertiary">
+            {timestamp}
+          </Text>
+        </View>
+        {subtitle.length > 0 ? (
+          <View className="flex-row items-center gap-1.5">
+            <SymbolView
+              name="arrow.triangle.branch"
+              size={10}
+              tintColorClassName="accent-icon-subtle"
+              type="monochrome"
+            />
+            <Text
+              className="min-w-0 flex-1 font-mono text-2xs text-foreground-tertiary"
+              numberOfLines={1}
+            >
+              {subtitle.join(" · ")}
+            </Text>
+          </View>
+        ) : null}
+      </View>
+    </View>
   );
+  const containerStyle = {
+    borderTopLeftRadius: props.isFirst ? 20 : 0,
+    borderTopRightRadius: props.isFirst ? 20 : 0,
+    borderBottomLeftRadius: props.isLast ? 20 : 0,
+    borderBottomRightRadius: props.isLast ? 20 : 0,
+    overflow: "hidden" as const,
+  };
+  if (!canOperateThread) return <View style={containerStyle}>{rowContent}</View>;
 
   return (
     <ThreadSwipeable
+      resetKey={`${props.thread.environmentId}:${props.thread.id}`}
+      threadKey={`${props.thread.environmentId}:${props.thread.id}`}
       backgroundColor={cardColor}
+      containerStyle={containerStyle}
       fullSwipeWidth={windowWidth - 32}
       onDelete={props.onDelete}
       onSwipeableClose={props.onSwipeableClose}
@@ -304,71 +264,10 @@ function ArchivedThreadRow(props: {
         label: "Unarchive",
         onPress: props.onUnarchive,
       }}
-      simultaneousWithExternalGesture={props.simultaneousSwipeGesture}
+      simultaneousWith={props.simultaneousSwipeGesture}
       threadTitle={props.thread.title}
     >
-      {() => (
-        <View
-          className="flex-row items-center gap-3 bg-card px-4 py-3"
-          style={{
-            borderBottomColor: separatorColor,
-            borderBottomWidth: props.isLast ? 0 : 1,
-            borderTopLeftRadius: props.isFirst ? 20 : 0,
-            borderTopRightRadius: props.isFirst ? 20 : 0,
-            borderBottomLeftRadius: props.isLast ? 20 : 0,
-            borderBottomRightRadius: props.isLast ? 20 : 0,
-          }}
-        >
-          <View className="h-[34px] w-[34px] items-center justify-center rounded-[11px] bg-subtle">
-            <SymbolView name="archivebox.fill" size={15} tintColor={iconColor} type="monochrome" />
-          </View>
-
-          <View className="min-w-0 flex-1 gap-1">
-            <View className="flex-row items-center gap-2">
-              <Text
-                className="min-w-0 flex-1 text-base font-t3-bold leading-snug text-foreground"
-                numberOfLines={1}
-              >
-                {props.thread.title}
-              </Text>
-              <Text
-                className="text-xs text-foreground-tertiary"
-                style={{ fontVariant: ["tabular-nums"] }}
-              >
-                {timestamp}
-              </Text>
-            </View>
-            {subtitle.length > 0 ? (
-              <View className="flex-row items-center gap-1.5">
-                <SymbolView
-                  name="arrow.triangle.branch"
-                  size={10}
-                  tintColor={iconColor}
-                  type="monochrome"
-                />
-                <Text
-                  className="min-w-0 flex-1 text-2xs text-foreground-tertiary"
-                  numberOfLines={1}
-                  style={{ fontFamily: "monospace" }}
-                >
-                  {subtitle.join(" · ")}
-                </Text>
-              </View>
-            ) : null}
-          </View>
-
-          <ControlPillMenu actions={THREAD_ACTIONS} onPressAction={handleMenuAction}>
-            <Pressable
-              accessibilityLabel={`Actions for ${props.thread.title}`}
-              accessibilityRole="button"
-              className="h-8 w-8 items-center justify-center rounded-full active:bg-subtle"
-              hitSlop={6}
-            >
-              <SymbolView name="ellipsis" size={16} tintColor={iconColor} type="monochrome" />
-            </Pressable>
-          </ControlPillMenu>
-        </View>
-      )}
+      {() => rowContent}
     </ThreadSwipeable>
   );
 }
@@ -404,8 +303,7 @@ export function ArchivedThreadsScreen(props: {
 }) {
   const { onDeleteThread, onUnarchiveThread } = props;
   const openSwipeableRef = useRef<SwipeableMethods | null>(null);
-  const archiveScrollGesture = useMemo(() => Gesture.Native(), []);
-  const refreshTint = useThemeColor("--color-icon");
+  const archiveScrollGesture = useNativeGesture();
   const environmentLabelsById = useMemo(
     () =>
       new Map(
@@ -413,6 +311,7 @@ export function ArchivedThreadsScreen(props: {
       ),
     [props.environments],
   );
+  const serverConfigs = useServerConfigs();
   const listItems = useMemo<ReadonlyArray<ArchivedThreadListItem>>(() => {
     const items: ArchivedThreadListItem[] = [];
     for (const group of props.groups) {
@@ -421,6 +320,9 @@ export function ArchivedThreadsScreen(props: {
         kind: "project",
         key: `${group.key}:project`,
         environmentLabel,
+        environmentMachine: resolveEnvironmentMachineKind(
+          serverConfigs.get(group.project.environmentId) ?? null,
+        ),
         project: group.project,
       });
 
@@ -436,7 +338,7 @@ export function ArchivedThreadsScreen(props: {
       });
     }
     return items;
-  }, [environmentLabelsById, props.groups]);
+  }, [environmentLabelsById, props.groups, serverConfigs]);
   const handleSwipeableWillOpen = useCallback((methods: SwipeableMethods) => {
     if (openSwipeableRef.current && openSwipeableRef.current !== methods) {
       openSwipeableRef.current.close();
@@ -455,7 +357,11 @@ export function ArchivedThreadsScreen(props: {
       if (item.kind === "project") {
         return (
           <View className="pt-4">
-            <ProjectGroupLabel environmentLabel={item.environmentLabel} project={item.project} />
+            <ProjectGroupLabel
+              environmentLabel={item.environmentLabel}
+              environmentMachine={item.environmentMachine}
+              project={item.project}
+            />
           </View>
         );
       }
@@ -486,7 +392,7 @@ export function ArchivedThreadsScreen(props: {
     if (isInitialLoad) {
       return (
         <View className="items-center py-16">
-          <ActivityIndicator color={refreshTint} />
+          <AppActivityIndicator colorClassName="accent-icon" />
           <Text className="mt-3 text-sm text-foreground-muted">Loading archive...</Text>
         </View>
       );
@@ -502,12 +408,15 @@ export function ArchivedThreadsScreen(props: {
         title={isFiltered ? "No matching threads" : "No archived threads"}
       />
     );
-  }, [isFiltered, isInitialLoad, refreshTint]);
+  }, [isFiltered, isInitialLoad]);
 
   return (
-    <View className="flex-1 bg-sheet">
+    // Keep the list inside this native container. Form-sheet resizing otherwise
+    // treats the flattened background as a header and shrinks the list to zero.
+    <View collapsable={false} className="flex-1 bg-sheet">
       <ArchivedThreadsHeader
         environments={props.environments}
+        searchQuery={props.searchQuery}
         onEnvironmentChange={props.onEnvironmentChange}
         onRefresh={props.onRefresh}
         onSearchQueryChange={props.onSearchQueryChange}
@@ -516,37 +425,39 @@ export function ArchivedThreadsScreen(props: {
         sortOrder={props.sortOrder}
       />
 
-      <GestureDetector gesture={archiveScrollGesture}>
-        <LegendList
-          className="flex-1"
-          contentContainerStyle={{
-            paddingBottom: 32,
-            paddingHorizontal: 16,
-            paddingTop: 4,
-          }}
-          contentInsetAdjustmentBehavior="automatic"
-          data={listItems}
-          estimatedItemSize={62}
-          getItemType={(item) => item.kind}
-          keyboardDismissMode="on-drag"
-          keyboardShouldPersistTaps="handled"
-          keyExtractor={(item) => item.key}
-          ListEmptyComponent={listEmptyComponent}
-          ListHeaderComponent={
-            props.error ? <ArchiveError message={props.error} onRetry={props.onRefresh} /> : null
-          }
-          onScrollBeginDrag={() => openSwipeableRef.current?.close()}
-          refreshControl={
-            <RefreshControl
-              onRefresh={props.onRefresh}
-              refreshing={props.isLoading && !isInitialLoad}
-              tintColor={String(refreshTint)}
-            />
-          }
-          renderItem={renderListItem}
-          showsVerticalScrollIndicator={false}
-        />
-      </GestureDetector>
+      <SettingsScreenContent>
+        <GestureDetector gesture={archiveScrollGesture}>
+          <LegendList
+            className="flex-1"
+            contentContainerStyle={{
+              paddingBottom: 32,
+              paddingHorizontal: 16,
+              paddingTop: 4,
+            }}
+            contentInsetAdjustmentBehavior="automatic"
+            data={listItems}
+            estimatedItemSize={62}
+            getItemType={(item) => item.kind}
+            keyboardDismissMode="on-drag"
+            keyboardShouldPersistTaps="handled"
+            keyExtractor={(item) => item.key}
+            ListEmptyComponent={listEmptyComponent}
+            ListHeaderComponent={
+              props.error ? <ArchiveError message={props.error} onRetry={props.onRefresh} /> : null
+            }
+            onScrollBeginDrag={() => openSwipeableRef.current?.close()}
+            refreshControl={
+              <RefreshControl
+                onRefresh={props.onRefresh}
+                refreshing={props.isLoading && !isInitialLoad}
+                tintColorClassName={String("accent-icon")}
+              />
+            }
+            renderItem={renderListItem}
+            showsVerticalScrollIndicator={false}
+          />
+        </GestureDetector>
+      </SettingsScreenContent>
     </View>
   );
 }

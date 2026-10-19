@@ -3,44 +3,58 @@ import {
   apiTokenCredentials,
   Credentials,
   oauthCredentials,
+  type ResolvedCredentials,
 } from "@distilled.cloud/cloudflare/Credentials";
 import { ConfigError } from "@distilled.cloud/core/errors";
-import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Match from "effect/Match";
 import * as Redacted from "effect/Redacted";
-import { getAuthProvider } from "../Auth/AuthProvider.ts";
-import { ALCHEMY_PROFILE, Profile } from "../Auth/Profile.ts";
+import * as CredentialsCache from "../Auth/CredentialsCache.ts";
+import { deferUntilFirstUse, resolveProviderConfig } from "../Auth/Resolve.ts";
 import {
   CLOUDFLARE_AUTH_PROVIDER_NAME,
   type CloudflareAuthConfig,
   type CloudflareResolvedCredentials,
-} from "./Auth/AuthProvider.ts";
+} from "./Auth/AuthConfig.ts";
 
 export { Credentials, fromEnv } from "@distilled.cloud/cloudflare/Credentials";
+
+declare module "@distilled.cloud/cloudflare/Credentials" {
+  interface Credentials {
+    readonly kind: "Credentials";
+  }
+}
+
+/**
+ * Memoize a credentials-resolution effect until shortly before the resolved
+ * credentials expire — see {@link CredentialsCache.cacheUntilExpiry} for the
+ * caching rules. Non-OAuth credentials (API token / global key) never expire
+ * and cache forever.
+ */
+export const cacheUntilExpiry = <E>(
+  resolve: Effect.Effect<ResolvedCredentials, E>,
+) =>
+  CredentialsCache.cacheUntilExpiry(resolve, (credentials) =>
+    credentials.type === "oauth" ? credentials.expiresAt : undefined,
+  );
 
 /**
  * Build a `Credentials` layer that resolves Cloudflare credentials via the
  * Alchemy AuthProvider using the configured profile (defaults to "default",
- * overridable with the `ALCHEMY_PROFILE` env/config value).
+ * selected by the current Alchemy profile).
  */
 export const fromAuthProvider = () =>
   Layer.effect(
     Credentials,
     Effect.gen(function* () {
-      const profile = yield* Profile;
-      const auth = yield* getAuthProvider<
+      // Defer both profile lookup and credential resolution. Local-only dev
+      // builds this layer too, but never evaluates its credential recipe.
+      const resolve = yield* resolveProviderConfig<
         CloudflareAuthConfig,
         CloudflareResolvedCredentials
-      >(CLOUDFLARE_AUTH_PROVIDER_NAME);
-      const profileName = yield* ALCHEMY_PROFILE;
-      const ci = yield* Config.boolean("CI").pipe(Config.withDefault(false));
-
-      return profile.loadOrConfigure(auth, profileName, { ci }).pipe(
-        Effect.flatMap((config) =>
-          auth.read(profileName, config as CloudflareAuthConfig),
-        ),
+      >(CLOUDFLARE_AUTH_PROVIDER_NAME).pipe(
+        Effect.flatMap(({ resolve }) => resolve),
         Effect.map((creds) =>
           Match.value(creds).pipe(
             Match.when({ type: "apiToken" }, (c) =>
@@ -66,9 +80,16 @@ export const fromAuthProvider = () =>
         Effect.mapError(
           (e) =>
             new ConfigError({
-              message: `Failed to resolve Cloudflare credentials for profile '${profileName}': ${(e as { message?: string }).message ?? String(e)}`,
+              message: `Failed to resolve Cloudflare credentials: ${e.message}`,
             }),
         ),
+        deferUntilFirstUse,
       );
+
+      // `auth.read` refreshes and persists expired OAuth tokens when it is
+      // re-run, so expiry-aware caching (instead of caching the first
+      // resolution forever) is what keeps long-lived dev sessions
+      // authenticated across the ~1h access-token lifetime.
+      return yield* cacheUntilExpiry(resolve);
     }),
   );

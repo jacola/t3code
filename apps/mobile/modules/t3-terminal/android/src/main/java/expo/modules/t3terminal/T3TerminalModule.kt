@@ -30,6 +30,14 @@ class T3TerminalModule : Module() {
         view.focusRequest = focusRequest
       }
 
+      Prop("readOnly") { view: T3TerminalView, readOnly: Boolean ->
+        view.readOnly = readOnly
+      }
+
+      Prop("autoFocus") { view: T3TerminalView, autoFocus: Boolean ->
+        view.autoFocus = autoFocus
+      }
+
       Prop("appearanceScheme") { view: T3TerminalView, appearanceScheme: String ->
         view.appearanceScheme = appearanceScheme
       }
@@ -50,7 +58,14 @@ class T3TerminalModule : Module() {
         view.mutedForegroundColorHex = mutedForegroundColor
       }
 
-      Events("onInput", "onResize")
+      Prop("captureRequest") { view: T3TerminalView, request: Double ->
+        view.captureRequest = request
+      }
+      Events("onInput", "onResize", "onCapture")
+
+      OnViewDestroys { view: T3TerminalView ->
+        view.cleanup()
+      }
     }
   }
 }

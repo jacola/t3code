@@ -1,29 +1,14 @@
 /**
- * SQLite WASM client implementation for Effect SQL, backed by `@effect/wa-sqlite`.
+ * Connects Effect SQL to SQLite compiled to WebAssembly with
+ * `@effect/wa-sqlite`.
  *
- * This module exposes constructors and layers for providing both the
- * SQLite-specific `SqliteClient` service and the generic Effect `SqlClient`
- * service in browser, worker, and test runtimes. Use it for local-first
- * browser storage, offline caches, client-side migrations, sandboxed test
- * databases, and import/export workflows that snapshot a SQLite database as a
- * `Uint8Array`.
- *
- * `makeMemory` opens an in-memory database through the WASM memory VFS, so data
- * is transient unless the client `export` result is persisted and later passed
- * back to `import`. `make` talks to a scoped `Worker`, `SharedWorker`, or
- * `MessagePort`, which is the path used by the OPFS worker helper for persistent
- * browser storage. Worker-backed queries cross a message boundary, transferable
- * buffers can be supplied with `withTransferables`, and imports transfer the
- * supplied `Uint8Array` buffer to the worker.
- *
- * Both client variants serialize access through a single connection. A
- * transaction holds that connection for the lifetime of its scope, so keep
- * transactions short and use them for multi-statement writes that must commit
- * atomically. OPFS availability depends on the browser and origin, and multiple
- * tabs or workers opening the same OPFS database should coordinate migrations
- * and writes outside this module. Worker-backed clients restart their scoped
- * connection on worker errors, `executeStream` is not implemented there, and
- * SQLite does not support `updateValues`.
+ * This module can create an in-memory SQLite database in the current runtime or
+ * connect to a worker-backed database, such as the OPFS worker from
+ * `OpfsWorker`. Both clients are exposed as `SqliteClient` and the generic
+ * Effect SQL client, serialize access, support database import and export, and
+ * can install reactivity hooks from SQLite update notifications. In-memory
+ * clients can stream query rows; worker-backed clients cannot. `updateValues`
+ * is not supported by this driver.
  *
  * @since 4.0.0
  */
@@ -36,18 +21,18 @@ import * as Context from "effect/Context"
 import * as Deferred from "effect/Deferred"
 import * as Effect from "effect/Effect"
 import * as Exit from "effect/Exit"
-import * as Fiber from "effect/Fiber"
 import { identity } from "effect/Function"
 import * as Layer from "effect/Layer"
+import * as Reactivity from "effect/reactivity/Reactivity"
+import * as Rec from "effect/Record"
 import * as Scope from "effect/Scope"
 import * as ScopedRef from "effect/ScopedRef"
 import * as Semaphore from "effect/Semaphore"
+import * as Client from "effect/sql/SqlClient"
+import type { Connection } from "effect/sql/SqlConnection"
+import { classifySqliteError, SqlError } from "effect/sql/SqlError"
+import * as Statement from "effect/sql/Statement"
 import * as Stream from "effect/Stream"
-import * as Reactivity from "effect/unstable/reactivity/Reactivity"
-import * as Client from "effect/unstable/sql/SqlClient"
-import type { Connection } from "effect/unstable/sql/SqlConnection"
-import { classifySqliteError, SqlError } from "effect/unstable/sql/SqlError"
-import * as Statement from "effect/unstable/sql/Statement"
 import type { OpfsWorkerMessage } from "./internal/opfsWorker.ts"
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name"
@@ -74,7 +59,7 @@ export type TypeId = "~@effect/sql-sqlite-wasm/SqliteClient"
 /**
  * SQLite WASM client service interface, extending `SqlClient` with database `export` and `import` operations and marking `updateValues` as unsupported for SQLite.
  *
- * @category models
+ * @category services
  * @since 4.0.0
  */
 export interface SqliteClient extends Client.SqlClient {
@@ -90,7 +75,7 @@ export interface SqliteClient extends Client.SqlClient {
 /**
  * Service tag for the SQLite WASM client.
  *
- * @category tags
+ * @category services
  * @since 4.0.0
  */
 export const SqliteClient = Context.Service<SqliteClient>("@effect/sql-sqlite-wasm/SqliteClient")
@@ -125,6 +110,10 @@ export interface SqliteClientConfig {
 interface SqliteConnection extends Connection {
   readonly export: Effect.Effect<Uint8Array, SqlError>
   readonly import: (data: Uint8Array) => Effect.Effect<void, SqlError>
+}
+
+interface SqliteMemoryConnection extends SqliteConnection {
+  readonly isTransaction: () => boolean
 }
 
 const initModule = Effect.runSync(
@@ -198,7 +187,7 @@ export const makeMemory = (
                 if (rowMode === "object") {
                   const obj: Record<string, any> = {}
                   for (let i = 0; i < columns.length; i++) {
-                    obj[columns[i]] = row[i]
+                    Rec.assignProperty(obj, columns[i], row[i])
                   }
                   results.push(obj)
                 } else {
@@ -211,7 +200,8 @@ export const makeMemory = (
           catch: (cause) => new SqlError({ reason: classifyError(cause, "Failed to execute statement", "execute") })
         })
 
-      return identity<SqliteConnection>({
+      return identity<SqliteMemoryConnection>({
+        isTransaction: () => sqlite3.get_autocommit(db) === 0,
         execute(sql, params, transformRows) {
           return transformRows
             ? Effect.map(run(sql, params), transformRows)
@@ -221,6 +211,9 @@ export const makeMemory = (
           return run(sql, params)
         },
         executeValues(sql, params) {
+          return run(sql, params, "array")
+        },
+        executeValuesUnprepared(sql, params) {
           return run(sql, params, "array")
         },
         executeUnprepared(sql, params, transformRows) {
@@ -236,7 +229,7 @@ export const makeMemory = (
                 const row = sqlite3.row(stmt)
                 const obj: Record<string, any> = {}
                 for (let i = 0; i < columns.length; i++) {
-                  obj[columns[i]] = row[i]
+                  Rec.assignProperty(obj, columns[i], row[i])
                 }
                 yield obj
               }
@@ -264,20 +257,10 @@ export const makeMemory = (
       })
     })
 
-    const semaphore = yield* Semaphore.make(1)
-    const connection = yield* makeConnection
-
-    const acquirer = semaphore.withPermits(1)(Effect.succeed(connection))
-    const transactionAcquirer = Effect.uninterruptibleMask((restore) => {
-      const fiber = Fiber.getCurrent()!
-      const scope = Context.getUnsafe(fiber.context, Scope.Scope)
-      return Effect.as(
-        Effect.tap(
-          restore(semaphore.take(1)),
-          () => Scope.addFinalizer(scope, semaphore.release(1))
-        ),
-        connection
-      )
+    const { acquirer, onCommitFailure, transactionAcquirer } = Client.makeSqliteAcquirers({
+      connection: Effect.succeed(yield* makeConnection),
+      semaphore: yield* Semaphore.make(1),
+      isTransaction: (conn) => conn.isTransaction()
     })
 
     return Object.assign(
@@ -285,6 +268,8 @@ export const makeMemory = (
         acquirer,
         compiler,
         transactionAcquirer,
+        onCommitFailure,
+        releaseSavepoint: (name) => `RELEASE SAVEPOINT ${name}`,
         spanAttributes: [
           ...(options.spanAttributes ? Object.entries(options.spanAttributes) : []),
           [ATTR_DB_SYSTEM_NAME, "sqlite"]
@@ -294,9 +279,9 @@ export const makeMemory = (
       {
         [TypeId]: TypeId as TypeId,
         config: options,
-        export: semaphore.withPermits(1)(connection.export),
+        export: Effect.scoped(Effect.flatMap(transactionAcquirer, (conn) => conn.export)),
         import(data: Uint8Array) {
-          return semaphore.withPermits(1)(connection.import(data))
+          return Effect.scoped(Effect.flatMap(transactionAcquirer, (conn) => conn.import(data)))
         }
       }
     )
@@ -317,10 +302,9 @@ export const make = (
     const transformRows = options.transformResultNames ?
       Statement.defaultTransforms(options.transformResultNames).array :
       undefined
-    const pending = new Map<number, (effect: Exit.Exit<any, SqlError>) => void>()
-
     const makeConnection = Effect.gen(function*() {
       let currentId = 0
+      const pending = new Map<number, (effect: Exit.Exit<any, SqlError>) => void>()
       const scope = yield* Effect.scope
       const readyDeferred = yield* Deferred.make<void>()
 
@@ -346,7 +330,7 @@ export const make = (
           if (error) {
             resume(
               Exit.fail(
-                new SqlError({ reason: classifyError(error as string, "Failed to execute statement", "execute") })
+                new SqlError({ reason: classifyError(error, "Failed to execute statement", "execute") })
               )
             )
           } else {
@@ -355,8 +339,19 @@ export const make = (
         }
       }
       port.addEventListener("message", onMessage)
+      if ("start" in port) {
+        port.start()
+      }
 
-      function onError() {
+      function onError(cause: Event) {
+        const exit = Exit.fail(
+          new SqlError({ reason: classifyError(cause, "SQLite WASM worker failed", "worker") })
+        )
+        const requests = Array.from(pending.values())
+        pending.clear()
+        for (const resume of requests) {
+          resume(exit)
+        }
         Effect.runFork(ScopedRef.set(connectionRef, makeConnection))
       }
       if ("onerror" in worker) {
@@ -366,7 +361,7 @@ export const make = (
       yield* Scope.addFinalizer(
         scope,
         Effect.sync(() => {
-          worker.removeEventListener("message", onMessage)
+          port.removeEventListener("message", onMessage)
           worker.removeEventListener("error", onError)
         })
       )
@@ -388,7 +383,7 @@ export const make = (
         params: ReadonlyArray<unknown> = [],
         rowMode: "object" | "array" = "object"
       ): Effect.Effect<Array<any>, SqlError, never> => {
-        const rows = Effect.withFiber<[Array<string>, Array<any>], SqlError>((fiber) => {
+        const rows = Effect.withFiber<WorkerResult, SqlError>((fiber) => {
           const id = currentId++
           return send(id, [id, sql, params], fiber.getRef(Transferables))
         })
@@ -407,6 +402,9 @@ export const make = (
           return run(sql, params)
         },
         executeValues(sql, params) {
+          return run(sql, params, "array")
+        },
+        executeValuesUnprepared(sql, params) {
           return run(sql, params, "array")
         },
         executeUnprepared(sql, params, transformRows) {
@@ -430,21 +428,18 @@ export const make = (
 
     const connectionRef = yield* ScopedRef.fromAcquire(makeConnection)
 
-    const semaphore = yield* Semaphore.make(1)
-    const acquirer = semaphore.withPermits(1)(ScopedRef.get(connectionRef))
-    const transactionAcquirer = Effect.uninterruptibleMask(Effect.fnUntraced(function*(restore) {
-      const fiber = Fiber.getCurrent()!
-      const scope = Context.getUnsafe(fiber.context, Scope.Scope)
-      yield* restore(semaphore.take(1))
-      yield* Scope.addFinalizer(scope, semaphore.release(1))
-      return yield* ScopedRef.get(connectionRef)
-    }))
+    const { acquirer, onCommitFailure, transactionAcquirer } = Client.makeSqliteAcquirers({
+      connection: ScopedRef.get(connectionRef),
+      semaphore: yield* Semaphore.make(1)
+    })
 
     return Object.assign(
       (yield* Client.make({
         acquirer,
         compiler,
         transactionAcquirer,
+        onCommitFailure,
+        releaseSavepoint: (name) => `RELEASE SAVEPOINT ${name}`,
         spanAttributes: [
           ...(options.spanAttributes ? Object.entries(options.spanAttributes) : []),
           [ATTR_DB_SYSTEM_NAME, "sqlite"]
@@ -465,17 +460,19 @@ export const make = (
 function rowToObject(columns: Array<string>, row: Array<any>) {
   const obj: Record<string, any> = {}
   for (let i = 0; i < columns.length; i++) {
-    obj[columns[i]] = row[i]
+    Rec.assignProperty(obj, columns[i], row[i])
   }
   return obj
 }
-const extractObject = (rows: [Array<string>, Array<any>]) => rows[1].map((row) => rowToObject(rows[0], row))
-const extractRows = (rows: [Array<string>, Array<any>]) => rows[1]
+type WorkerResult = [columns: Array<Array<string>>, rows: Array<any>]
+
+const extractObject = (rows: WorkerResult) => rows[1].map((row, index) => rowToObject(rows[0][index], row))
+const extractRows = (rows: WorkerResult) => rows[1]
 
 /**
  * Fiber reference that stores transferables to include with worker-backed SQLite WASM query messages.
  *
- * @category transferables
+ * @category services
  * @since 4.0.0
  */
 export const Transferables = Context.Reference<ReadonlyArray<Transferable>>(

@@ -1,5 +1,7 @@
+import type { ConfigError } from "effect/Config";
 import { ConfigProvider } from "effect/ConfigProvider";
 import * as Context from "effect/Context";
+import type { Crypto } from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import { FileSystem } from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -7,22 +9,28 @@ import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import { Path } from "effect/Path";
 import * as Scope from "effect/Scope";
-import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
-import type { HttpClient } from "effect/unstable/http/HttpClient";
-import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import type { HttpClient } from "effect/http/HttpClient";
+import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import type { ActionLike } from "./Action.ts";
 import { AlchemyContext, AlchemyContextLive } from "./AlchemyContext.ts";
-import { provideFreshArtifactStore } from "./Artifacts.ts";
+import { type ArtifactStore, provideFreshArtifactStore } from "./Artifacts.ts";
 import { AuthProviders } from "./Auth/AuthProvider.ts";
 import { CredentialsStore, CredentialsStoreLive } from "./Auth/Credentials.ts";
-import { Profile, ProfileLive } from "./Auth/Profile.ts";
-import { Cli } from "./Cli/Cli.ts";
+import { ProfileStore, ProfileStoreLive } from "./Auth/Profile.ts";
+// Type-only: with verbatimModuleSyntax a value import would survive emit and
+// drag the terminal helpers (node:tty, Sigil's ansi helpers) into every unbundled
+// child process that loads Stack.ts.
+import type { Interaction } from "./Interaction.ts";
 import type { Input, InputProps } from "./Input.ts";
 import * as Output from "./Output.ts";
+import type { Provider, ProviderCollectionLike } from "./Provider.ts";
 import type { ResourceBinding, ResourceLike } from "./Resource.ts";
 import { Stage } from "./Stage.ts";
+import { StackContext } from "./StackContext.ts";
 import type { State } from "./State/State.ts";
-import { loadConfigProvider } from "./Util/ConfigProvider.ts";
+import type { SecretsEntry, SecretsOption } from "./Secrets/Provider.ts";
+import { loadConfigProvider, stackConfigLayer } from "./Util/ConfigProvider.ts";
 import { effectClass, taggedFunction } from "./Util/effect.ts";
 import { fileLogger } from "./Util/FileLogger.ts";
 import { PlatformServices } from "./Util/PlatformServices.ts";
@@ -32,14 +40,37 @@ export type StackServices =
   | Stage
   | Scope.Scope
   | FileSystem
+  | Crypto
   | Path
   | AlchemyContext
   | HttpClient
   | ChildProcessSpawner
   | AuthProviders
-  | Profile
+  | ProfileStore
+  | ArtifactStore
   | CredentialsStore
-  | Cli;
+  | Interaction;
+
+export type ProviderServices =
+  | ProviderCollectionLike
+  | Provider<any>
+  | EnvironmentLike
+  | CredentialsLike
+  | DockerLike;
+
+// tagged type to allow types like AWSEnvironment/AWS Region to bubble through
+export interface EnvironmentLike {
+  readonly kind: "Environment";
+}
+
+// tagged type to allow types like AWS Credentials to bubble through
+export interface CredentialsLike {
+  readonly kind: "Credentials";
+}
+
+export interface DockerLike {
+  readonly key: "@alchemy/Docker";
+}
 
 export type StackEffect<A, Err = never, Req = never> = Effect.Effect<
   A,
@@ -49,9 +80,10 @@ export type StackEffect<A, Err = never, Req = never> = Effect.Effect<
   | Scope.Scope
   | AuthProviders
   | AlchemyContext
-  | Cli
-  | Profile
+  | Interaction
+  | ProfileStore
   | CredentialsStore
+  | ArtifactStore
   | State
   | Req
 >;
@@ -61,10 +93,53 @@ export type Stack = Context.ServiceClass.Shape<
   Omit<StackSpec, "output">
 >;
 
+/**
+ * Where a stack's configuration comes from: a ConfigProvider layer, or a
+ * list of them applied in order, later ones overriding earlier ones.
+ *
+ * The process environment implicitly closes every list, so the shell
+ * overrides every provider. List `Secrets.ProcessEnv()` yourself to rank it
+ * elsewhere, or `Secrets.ProcessEnv({ disabled: true })` to leave it out.
+ * Omitting `secrets` preserves the existing ConfigProvider and CLI dotenv behavior.
+ *
+ * ```ts
+ * secrets: [
+ *   Doppler.Secrets({ project: "app", config: "dev" }),
+ *   Secrets.DotEnv(),
+ *   Secrets.ProcessEnv(),
+ * ]
+ * ```
+ */
+export type SecretProviders = SecretsEntry | ReadonlyArray<SecretsEntry>;
+
+/**
+ * The `secrets` option: providers, or a callback that picks them from the
+ * stage, so one stack can read `.env` locally and a secrets manager
+ * elsewhere:
+ *
+ * ```ts
+ * secrets: ({ stage }) =>
+ *   stage === "dev"
+ *     ? Secrets.DotEnv()
+ *     : Doppler.Secrets({ project: "app", config: stage }),
+ * ```
+ */
+export type StackSecrets = SecretsOption<SecretProviders>;
+
 export interface StackProps<Req> {
-  providers: Layer.Layer<NoInfer<Req>, never, StackServices>;
+  providers: Layer.Layer<Extract<Req, ProviderServices>, never, StackServices>;
   state: Layer.Layer<State, never, StackServices>;
+  /** Opt in to secret providers. When omitted, existing configuration is preserved. */
+  secrets?: StackSecrets;
 }
+
+/**
+ * Runtime fields the Stack factory attaches to a configured stack effect.
+ * Class-reference forms expose only `stackName` until `.make(...)`.
+ */
+export type ConfiguredStackMeta<Req = never> = {
+  readonly stackName: string;
+} & StackProps<Req>;
 
 export const Stack: Context.ServiceClass<
   Stack,
@@ -77,47 +152,50 @@ export const Stack: Context.ServiceClass<
     },
     effect: Effect.Effect<
       NoInfer<A extends object ? InputProps<A> : Input<A>>,
-      never,
+      ConfigError,
       Req
     >,
-  ): Effect.Effect<CompiledStack<A>>;
+  ): Effect.Effect<CompiledStack<A>, ConfigError>;
   <Self>(): {
     <A, Req>(
       stackName: string,
       options: StackProps<NoInfer<Req>>,
-      eff: Effect.Effect<A, never, Req>,
-    ): Effect.Effect<Self> & {
+      eff: Effect.Effect<A, ConfigError, Req>,
+    ): Effect.Effect<Self, ConfigError> & {
       new (_: never): A extends object ? A : {};
+      readonly stackName: string;
       stage: {
         [stage: string]: Effect.Effect<Self>;
       };
     };
   };
   <Self, Shape>(): {
-    Shape: Shape;
     (stackName: string): Effect.Effect<Self> & {
       new (_: never): Output.ToOutput<Shape>;
+      readonly stackName: string;
       make: <A, Req>(
         options: StackProps<NoInfer<Req>>,
-        effect: Effect.Effect<A, never, Req>,
-      ) => Effect.Effect<CompiledStack<A>>;
+        effect: Effect.Effect<A, ConfigError, Req>,
+      ) => Effect.Effect<CompiledStack<A>, ConfigError> &
+        ConfiguredStackMeta<NoInfer<Req>>;
       stage: {
         [stage: string]: Effect.Effect<Self>;
       };
     };
   };
-  <A, Req>(
+  <A, Req extends StackServices | ProviderServices = never>(
     stackName: string,
     options: StackProps<NoInfer<Req>>,
-    eff: Effect.Effect<A, never, Req | StackServices>,
-  ): Effect.Effect<CompiledStack<A>>;
+    eff: Effect.Effect<A, ConfigError, Req>,
+  ): Effect.Effect<CompiledStack<A>, ConfigError> &
+    ConfiguredStackMeta<NoInfer<Req>>;
 } = Object.assign(
   taggedFunction(
-    Context.Service<Stack, Omit<StackSpec, "output">>()("Stack"),
+    StackContext,
     <A, Req>(
       stackName?: string,
       options?: StackProps<NoInfer<Req>>,
-      eff?: Effect.Effect<A, never, Req>,
+      eff?: Effect.Effect<A, ConfigError, Req>,
     ) => {
       if (!stackName) {
         return (stackName: string) =>
@@ -129,14 +207,18 @@ export const Stack: Context.ServiceClass<
               stage: createStageProxy(stackName),
               state: options?.state,
               providers: options?.providers,
+              secrets: options?.secrets,
               make: <Req = never>(
                 options: StackProps<NoInfer<Req>>,
-                eff: Effect.Effect<A, never, Req>,
-              ) => Stack(stackName, options, eff),
+                eff: Effect.Effect<A, ConfigError, Req>,
+              ) =>
+                // @ts-expect-error
+                Stack(stackName, options, eff),
             },
           );
       }
       return eff!.pipe(
+        // @ts-expect-error
         make({
           name: stackName,
           ...options!,
@@ -147,6 +229,7 @@ export const Stack: Context.ServiceClass<
             stage: createStageProxy(stackName),
             state: options?.state,
             providers: options?.providers,
+            secrets: options?.secrets,
           }),
       );
     },
@@ -191,6 +274,8 @@ export interface MakeStackProps<ROut = never> {
   name: string;
   providers: Layer.Layer<ROut, never, StackServices>;
   state: Layer.Layer<State, never, StackServices>;
+  /** Opt in to secret providers. When omitted, existing configuration is preserved. */
+  secrets?: StackSecrets;
   /** @internal */
   stack?: StackSpec;
 }
@@ -211,7 +296,7 @@ export const make =
                 `    providers: Cloudflare.providers(),\n` +
                 `    state: Cloudflare.state(), // <-- required\n` +
                 `  }, ...)\n` +
-                `See https://v2.alchemy.run/concepts/state-store for available state stores.`,
+                `See https://alchemy.run/state-store for available state stores.`,
             ),
           );
         }
@@ -229,6 +314,7 @@ export const make =
         }
         return options.providers.pipe(
           Layer.provideMerge(options.state),
+          Layer.provideMerge(stackConfigLayer(options.secrets)),
           Layer.provideMerge(
             Layer.effect(
               Stack,
@@ -278,13 +364,12 @@ const platform = Layer.mergeAll(
   PlatformServices,
   FetchHttpClient.layer,
   Logger.layer([fileLogger("out")], { mergeWithExisting: true }),
-  Layer.provide(ProfileLive, PlatformServices),
+  Layer.provide(ProfileStoreLive, PlatformServices),
   Layer.provide(CredentialsStoreLive, PlatformServices),
 );
 // override alchemy state store, CLI/reporting, state, and Config
 const alchemy = (overrides?: { dev?: boolean }) =>
   Layer.mergeAll(
-    // CLI.inkCLI(),
     // optional
     overrides?.dev
       ? Layer.provide(
@@ -317,11 +402,13 @@ export const evalStack = <A, B, StackErr, Err, Req>(
   const body = Effect.gen(function* () {
     const stack = yield* effect;
     const configProvider = yield* loadConfigProvider(Option.none());
-
     return yield* fn(stack).pipe(
       provideFreshArtifactStore,
-      Effect.provide(stack.services),
-      Effect.provide(Layer.succeed(ConfigProvider, configProvider)),
+      Effect.provide(
+        Layer.succeedContext(stack.services).pipe(
+          Layer.provideMerge(Layer.succeed(ConfigProvider, configProvider)),
+        ),
+      ),
     );
   }).pipe(
     Effect.provide(
@@ -330,10 +417,13 @@ export const evalStack = <A, B, StackErr, Err, Req>(
         Effect.serviceOption(AuthProviders).pipe(
           Effect.map(Option.getOrElse(() => ({}))),
         ),
+      ).pipe(
+        Layer.provideMerge(Layer.succeed(Stage, options.stage)),
+        Layer.provideMerge(
+          Layer.provideMerge(alchemy({ dev: options.dev }), platform),
+        ),
       ),
     ),
-    Effect.provide(Layer.succeed(Stage, options.stage)),
-    Effect.provide(Layer.provideMerge(alchemy({ dev: options.dev }), platform)),
   );
 
   return options.scope === undefined

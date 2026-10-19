@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { AGENT_PROMPT as PROMPT } from "./agentPrompt";
+import { useAgentPrompt } from "./agentPrompt";
 
 export default function CopyForAgent() {
   const [copied, setCopied] = useState(false);
+  const PROMPT = useAgentPrompt();
 
   const onCopy = async () => {
     try {
@@ -25,8 +26,14 @@ export default function CopyForAgent() {
   };
 
   return (
-    <div className="alc-copy-agent">
-      <code className="alc-copy-agent__text">{PROMPT}</code>
+    <div className="alc-copy-agent" data-nosnippet="">
+      <code
+        className="alc-copy-agent__text"
+        tabIndex={0}
+        aria-label="Prompt for your coding agent"
+      >
+        {PROMPT}
+      </code>
       <button
         type="button"
         onClick={onCopy}

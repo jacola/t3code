@@ -5,10 +5,13 @@ import {
   type RelayClientInstallProgressStage,
 } from "@t3tools/contracts";
 import { RelayOkResponse } from "@t3tools/contracts/relay";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
 import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
 import * as Console from "effect/Console";
+import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -16,42 +19,129 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as References from "effect/References";
-import { Command, Flag, GlobalFlag, Prompt } from "effect/unstable/cli";
-import {
-  FetchHttpClient,
-  HttpClient,
-  HttpClientRequest,
-  HttpClientResponse,
-} from "effect/unstable/http";
-import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import * as Schema from "effect/Schema";
+import { Command, Flag, GlobalFlag, Prompt } from "effect/cli";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as BootService from "../cloud/bootService.ts";
 import * as CliState from "../cloud/CliState.ts";
 import * as CliTokenManager from "../cloud/CliTokenManager.ts";
-import { CLOUD_LINKED_USER_ID, RELAY_URL_SECRET } from "../cloud/config.ts";
+import { filterRelayResponse } from "../cloud/relayResponse.ts";
+import {
+  CLOUD_LINK_REVOKED,
+  CLOUD_LINKED_USER_ID,
+  isAgentActivityPublishingEnabledValue,
+  PUBLISH_AGENT_ACTIVITY_SECRET,
+  RELAY_URL_SECRET,
+} from "../cloud/config.ts";
 import { relayUrlConfig } from "../cloud/publicConfig.ts";
-import { headlessRelayClientTracingLayer } from "../cloud/relayTracing.ts";
+import * as RelayTracing from "../cloud/relayTracing.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ExternalLauncher from "../process/externalLauncher.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import { resolveCliCommand } from "./invocation.ts";
+import { offerServiceDuringOnboarding, recoverServiceOnboardingOffer } from "./service.ts";
+import * as CliService from "./service.ts";
 
-const jsonFlag = Flag.boolean("json").pipe(
+const jsonFlag = Flag.Boolean("json").pipe(
   Flag.withDescription("Emit JSON instead of human-readable output."),
   Flag.withDefault(false),
 );
 
+const isCloudCliTokenManagerError = Schema.is(CliTokenManager.CloudCliTokenManagerError);
+
+const headlessFlag = Flag.Boolean("headless").pipe(
+  Flag.withDescription("Authorize without a local browser using the OAuth device flow."),
+  Flag.withDefault(false),
+);
+
+/**
+ * Inside an SSH session there is no local browser to complete the loopback
+ * OAuth callback, so the device authorization grant is the only flow that
+ * can work.
+ */
+export const headlessSessionConfig = Config.all({
+  sshConnection: Config.String("SSH_CONNECTION").pipe(Config.option),
+  sshTty: Config.String("SSH_TTY").pipe(Config.option),
+}).pipe(
+  Config.map(({ sshConnection, sshTty }) => Option.isSome(sshConnection) || Option.isSome(sshTty)),
+);
+
+const showDeviceAuthorizationPrompt = (prompt: CliTokenManager.DeviceAuthorizationPrompt) =>
+  Console.log(formatDeviceAuthorizationPrompt(prompt));
+
+function formatDeviceAuthorizationPrompt(
+  prompt: CliTokenManager.DeviceAuthorizationPrompt,
+): string {
+  const minutes = Math.max(1, Math.round(Duration.toMinutes(prompt.expiresIn)));
+  return [
+    "Headless authorization",
+    "Open this URL on a device with a browser:",
+    `  ${prompt.verificationUriComplete ?? prompt.verificationUri}`,
+    "",
+    `Confirm this code when asked: ${prompt.userCode}`,
+    "",
+    `Waiting for approval (expires in ${minutes} min). Press Ctrl+C to cancel.`,
+  ].join("\n");
+}
+
+const authorizeCli = Effect.fn("cloud.cli.authorize")(function* (options: {
+  readonly headless: boolean;
+}) {
+  const tokens = yield* CliTokenManager.CloudCliTokenManager;
+  const useOutOfBandOAuth = options.headless || (yield* headlessSessionConfig);
+  if (!useOutOfBandOAuth) {
+    const authorization = yield* tokens.get;
+    if (authorization._tag === "Authorized") {
+      return authorization.token.identity ?? null;
+    }
+    yield* Console.log("\nHeadless mode enabled. A new authorization link is ready below.");
+  }
+  const existing = yield* tokens.getExisting.pipe(
+    Effect.catchTags({
+      CloudCliCredentialRefreshError: () =>
+        Console.log(
+          "The stored T3 Connect credential could not be refreshed; signing in again.",
+        ).pipe(Effect.as(Option.none())),
+    }),
+  );
+  if (Option.isSome(existing)) {
+    return existing.value.identity ?? null;
+  }
+  const { token, identity } = yield* CliTokenManager.deviceAuthorizationLogin(
+    showDeviceAuthorizationPrompt,
+  ).pipe(
+    Effect.mapError((cause) =>
+      isCloudCliTokenManagerError(cause)
+        ? cause
+        : new CliTokenManager.CloudCliAuthorizationError({ cause }),
+    ),
+  );
+  yield* tokens.store(token);
+  return identity;
+});
+
 function bytesToString(value: Uint8Array): string {
   return new TextDecoder().decode(value);
+}
+
+function stringToBytes(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
 }
 
 interface CloudCliStatus {
   readonly desired: boolean;
   readonly authenticated: boolean;
   readonly linked: boolean;
+  readonly revoked: boolean;
   readonly cloudUserId: string | null;
   readonly relayUrl: string | null;
+  readonly publishAgentActivity: boolean;
   readonly relayClient: RelayClient.RelayClientStatus;
 }
 
@@ -85,18 +175,22 @@ function formatCloudStatus(status: CloudCliStatus, options?: { readonly json?: b
     return JSON.stringify(status, null, 2);
   }
 
-  const provisioned = status.linked
-    ? "provisioned"
-    : status.desired && status.authenticated
-      ? "pending server startup"
-      : "not provisioned";
+  const provisioned = status.revoked
+    ? "removed from T3 Connect"
+    : status.linked
+      ? "provisioned"
+      : status.desired && status.authenticated
+        ? "pending server startup"
+        : "not provisioned";
   const nextStep = !status.authenticated
     ? "Run `t3 connect link` to authorize and enable T3 Connect."
-    : !status.desired
-      ? "Run `t3 connect link` to enable T3 Connect."
-      : !status.linked
-        ? "Start T3 to provision the environment link and launch its managed tunnel."
-        : undefined;
+    : status.revoked
+      ? "Run `t3 connect link` to link this environment again."
+      : !status.desired
+        ? "Run `t3 connect link` to enable T3 Connect."
+        : !status.linked
+          ? "Start T3 to provision the environment link and launch its managed tunnel."
+          : undefined;
 
   return [
     "T3 Connect",
@@ -104,7 +198,10 @@ function formatCloudStatus(status: CloudCliStatus, options?: { readonly json?: b
     `  Authorization: ${status.authenticated ? "stored credential" : "missing"}`,
     `  Environment link: ${provisioned}`,
     `  Relay: ${status.relayUrl ?? "not provisioned"}`,
+    `  Publish agent activity: ${status.publishAgentActivity ? "enabled" : "disabled"}`,
     ...formatRelayClientStatus(status.relayClient),
+    "",
+    "This is saved setup, not a live connection check. Check the background service with `t3 service status`.",
     ...(nextStep ? ["", `Next: ${nextStep}`] : []),
   ].join("\n");
 }
@@ -113,7 +210,7 @@ const CLOUD_CLI_LIVE_SERVER_TIMEOUT = Duration.seconds(5);
 
 const confirmRelayClientInstall = (version: string) =>
   Prompt.run(
-    Prompt.confirm({
+    Prompt.Confirm({
       message: `The T3 relay client is required for T3 Connect. Download and install version ${version}?`,
       initial: false,
     }),
@@ -234,7 +331,7 @@ const unlinkRelayEnvironment = Effect.fn("cloud.cli.unlink_relay_environment")(f
     return { status: "not-authenticated" } satisfies RelayUnlinkResult;
   }
 
-  const environment = yield* ServerEnvironment.ServerEnvironment;
+  const environment = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const environmentId = yield* environment.getEnvironmentId;
   const relayUrl = yield* relayUrlConfig;
   const httpClient = yield* HttpClient.HttpClient;
@@ -243,7 +340,7 @@ const unlinkRelayEnvironment = Effect.fn("cloud.cli.unlink_relay_environment")(f
   ).pipe(
     HttpClientRequest.bearerToken(token.value.accessToken),
     httpClient.execute,
-    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.flatMap(filterRelayResponse),
     Effect.flatMap(HttpClientResponse.schemaBodyJson(RelayOkResponse)),
     withRelayClientTracing,
   );
@@ -252,6 +349,11 @@ const unlinkRelayEnvironment = Effect.fn("cloud.cli.unlink_relay_environment")(f
     : ({ status: "not-linked" } satisfies RelayUnlinkResult);
 });
 
+/**
+ * Prints the local disconnect outcome, then whether the relay record was revoked.
+ * A missing CLI login or a failed relay DELETE leaves that record registered, so
+ * those outcomes warn to deregister it from the T3 Connect account page.
+ */
 export const reportCloudDisconnectResults = Effect.fn("cloud.cli.report_disconnect_results")(
   function* (input: {
     readonly clearAuthorization: boolean;
@@ -280,7 +382,11 @@ export const reportCloudDisconnectResults = Effect.fn("cloud.cli.report_disconne
       yield* Console.warn(
         input.clearAuthorization
           ? "Could not revoke the relay-side environment record before signing out.\nThe stored CLI authorization was still removed locally."
-          : "Could not revoke the relay-side environment record yet.\nRun `t3 connect unlink` again when the relay is reachable.",
+          : "Could not revoke the relay-side environment record yet.\nRun `t3 connect unlink` again when the relay is reachable, or deregister it from the T3 Connect page of your T3 account.",
+      );
+    } else if (input.relayResult.value.status === "not-authenticated") {
+      yield* Console.warn(
+        "The relay-side environment record was not revoked.\nDeregister it from the T3 Connect page of your T3 account, or run `t3 connect login` and retry.",
       );
     } else if (input.relayResult.value.status === "revoked") {
       yield* Console.log("Revoked the relay-side environment record.");
@@ -308,11 +414,13 @@ const disconnectCloud = Effect.fn("cloud.cli.disconnect")(function* (options: {
   });
 
   if (options.clearAuthorization) {
-    yield* Console.log("Signed out of T3 Connect locally.");
+    yield* Console.log(
+      "Signed out of T3 Connect locally.\nThe background service is managed separately with `t3 service`.",
+    );
   }
 });
 
-const runCloudCommand = <A, E>(
+const runCloudCommand = Effect.fn("cloud.cli.run_cloud_command")(function* <A, E>(
   flags: { readonly baseDir: Option.Option<string> },
   run: Effect.Effect<
     A,
@@ -321,46 +429,90 @@ const runCloudCommand = <A, E>(
     | CliTokenManager.CloudCliTokenManager
     | RelayClient.RelayClient
     | EnvironmentAuth.EnvironmentAuth
+    | BootService.BootService
+    | Crypto.Crypto
     | FileSystem.FileSystem
     | HttpClient.HttpClient
     | Prompt.Environment
     | ServerConfig.ServerConfig
-    | ServerEnvironment.ServerEnvironment
+    | ServerEnvironment.ServerEnvironmentIdentity
   >,
   options?: {
     readonly quietLogs?: boolean;
   },
-) =>
-  Effect.gen(function* () {
-    const logLevel = yield* GlobalFlag.LogLevel;
-    const config = yield* resolveCliAuthConfig(flags, logLevel);
-    const minimumLogLevel = options?.quietLogs ? "Error" : config.logLevel;
-    const runtimeLayer = Layer.mergeAll(
-      ServerSecretStore.layer,
-      CliTokenManager.layer.pipe(Layer.provide(ServerSecretStore.layer)),
-      RelayClient.layerCloudflared({ baseDir: config.baseDir }),
-      EnvironmentAuth.runtimeLayer,
-      ServerEnvironment.layer,
-      headlessRelayClientTracingLayer,
-    ).pipe(
-      Layer.provideMerge(FetchHttpClient.layer),
-      Layer.provideMerge(ServerConfig.layer(config)),
-      Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+) {
+  const logLevel = yield* GlobalFlag.LogLevel;
+  const config = yield* resolveCliAuthConfig(flags, logLevel);
+  const minimumLogLevel = options?.quietLogs ? "Error" : config.logLevel;
+  const layerRuntime = Layer.mergeAll(
+    ServerSecretStore.layer,
+    CliTokenManager.layer.pipe(
+      Layer.provide(ServerSecretStore.layer),
+      Layer.provide(ExternalLauncher.layer),
+    ),
+    RelayClient.layerCloudflared({ baseDir: config.baseDir }),
+    EnvironmentAuth.layerRuntime,
+    CliService.layer(config),
+    RelayTracing.layerHeadlessRelayClient,
+  ).pipe(
+    Layer.provideMerge(FetchHttpClient.layer),
+    Layer.provideMerge(ServerConfig.layer(config)),
+    Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
+  );
+  return yield* run.pipe(Effect.provide(layerRuntime));
+});
+
+const connectedAs = (identity: string | null): string => (identity ? ` as ${identity}` : "");
+
+function formatRelayClientReady(version: string): string {
+  return `✓ Relay client ready · cloudflared ${version}`;
+}
+
+const linkEnvironmentForConnect = Effect.fn("cloud.cli.link_environment")(function* (options: {
+  readonly headless: boolean;
+  readonly publishOnly?: boolean;
+}) {
+  const publishOnly = options.publishOnly ?? false;
+  if (!publishOnly) {
+    const relayClient = yield* RelayClient.RelayClient;
+    const installed = yield* acquireRelayClientForLink(
+      relayClient,
+      confirmRelayClientInstall,
+      reportRelayClientInstallProgress,
     );
-    return yield* run.pipe(Effect.provide(runtimeLayer));
-  });
+    if (Option.isNone(installed)) {
+      yield* Console.log("T3 Connect setup cancelled. The relay client was not installed.");
+      return null;
+    }
+    yield* Console.log(formatRelayClientReady(installed.value.version));
+  }
+
+  const identity = yield* authorizeCli(options);
+  yield* CliState.setCliDesiredCloudLink(true, publishOnly ? "publish_only" : "managed");
+  if (yield* CliState.dropRevokedCloudLink) {
+    yield* Console.log(
+      "Removed the link T3 Connect no longer accepts. The next start links this environment again.",
+    );
+  }
+  if (publishOnly) {
+    const secrets = yield* ServerSecretStore.ServerSecretStore;
+    yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, stringToBytes("true"));
+  }
+  return { identity } as const;
+});
 
 const connectLoginCommand = Command.make("login", {
   ...projectLocationFlags,
+  headless: headlessFlag,
 }).pipe(
   Command.withDescription("Authorize the T3 Connect CLI without enabling remote access."),
   Command.withHandler((flags) =>
     runCloudCommand(
       flags,
       Effect.gen(function* () {
-        const tokens = yield* CliTokenManager.CloudCliTokenManager;
-        yield* tokens.get;
-        yield* Console.log("Signed in to T3 Connect.");
+        yield* Console.log("T3 Connect\n");
+        const identity = yield* authorizeCli(flags);
+        yield* Console.log(`✓ Signed in${connectedAs(identity)}`);
       }),
     ),
   ),
@@ -368,32 +520,29 @@ const connectLoginCommand = Command.make("login", {
 
 const connectLinkCommand = Command.make("link", {
   ...projectLocationFlags,
+  headless: headlessFlag,
+  publishOnly: Flag.Boolean("publish-only").pipe(
+    Flag.withDescription(
+      "Link to publish agent activity only — no managed tunnel. Reach this environment out of band (e.g. Tailscale).",
+    ),
+    Flag.withDefault(false),
+  ),
 }).pipe(
   Command.withDescription("Authorize this environment for T3 Connect on next start."),
   Command.withHandler((flags) =>
     runCloudCommand(
       flags,
       Effect.gen(function* () {
-        const relayClient = yield* RelayClient.RelayClient;
-        const installed = yield* acquireRelayClientForLink(
-          relayClient,
-          confirmRelayClientInstall,
-          reportRelayClientInstallProgress,
-        );
-        if (Option.isNone(installed)) {
-          yield* Console.log("T3 Connect setup cancelled. The relay client was not installed.");
-          return;
+        yield* Console.log("T3 Connect\n");
+        const linked = yield* linkEnvironmentForConnect(flags);
+        if (linked) {
+          const serveCommand = yield* resolveCliCommand("serve");
+          yield* Console.log(
+            flags.publishOnly
+              ? `✓ Authorized${connectedAs(linked.identity)}\n\nNext\n  Start T3 to publish agent activity (no managed tunnel).`
+              : `✓ Authorized${connectedAs(linked.identity)}\n\nNext\n  Start the server with \`${serveCommand}\` to make this machine reachable.`,
+          );
         }
-        yield* Console.log(
-          `Using relay client ${installed.value.version} from ${installed.value.executablePath}.`,
-        );
-
-        const tokens = yield* CliTokenManager.CloudCliTokenManager;
-        yield* tokens.get;
-        yield* CliState.setCliDesiredCloudLink(true);
-        yield* Console.log(
-          "This T3 environment will be available through T3 Connect the next time T3 starts.",
-        );
       }),
     ),
   ),
@@ -411,12 +560,22 @@ const connectStatusCommand = Command.make("status", {
         const secrets = yield* ServerSecretStore.ServerSecretStore;
         const relayClient = yield* RelayClient.RelayClient;
         const tokens = yield* CliTokenManager.CloudCliTokenManager;
-        const [desired, authenticated, cloudUserId, relayUrl, executable] = yield* Effect.all(
+        const [
+          desired,
+          authenticated,
+          cloudUserId,
+          relayUrl,
+          publishAgentActivity,
+          revoked,
+          executable,
+        ] = yield* Effect.all(
           [
             CliState.readCliDesiredCloudLink,
             tokens.hasCredential,
             secrets.get(CLOUD_LINKED_USER_ID),
             secrets.get(RELAY_URL_SECRET),
+            secrets.get(PUBLISH_AGENT_ACTIVITY_SECRET),
+            secrets.get(CLOUD_LINK_REVOKED),
             relayClient.resolve,
           ],
           { concurrency: "unbounded" },
@@ -425,8 +584,12 @@ const connectStatusCommand = Command.make("status", {
           desired,
           authenticated,
           linked: Option.isSome(cloudUserId),
+          revoked: Option.isSome(cloudUserId) && Option.isSome(revoked),
           cloudUserId: Option.isSome(cloudUserId) ? bytesToString(cloudUserId.value) : null,
           relayUrl: Option.isSome(relayUrl) ? bytesToString(relayUrl.value) : null,
+          publishAgentActivity: isAgentActivityPublishingEnabledValue(
+            Option.isSome(publishAgentActivity) ? bytesToString(publishAgentActivity.value) : null,
+          ),
           relayClient: executable,
         };
         yield* Console.log(formatCloudStatus(status, { json: flags.json }));
@@ -434,6 +597,72 @@ const connectStatusCommand = Command.make("status", {
       {
         quietLogs: flags.json,
       },
+    ),
+  ),
+);
+
+const connectPublishCommand = Command.make("publish", {
+  ...projectLocationFlags,
+  disable: Flag.Boolean("disable").pipe(
+    Flag.withDescription("Stop publishing agent activity to your mobile clients."),
+    Flag.withDefault(false),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Toggle publishing agent activity (push notifications and Live Activities) to your mobile clients.",
+  ),
+  Command.withHandler((flags) =>
+    runCloudCommand(
+      flags,
+      Effect.gen(function* () {
+        const secrets = yield* ServerSecretStore.ServerSecretStore;
+        const tokens = yield* CliTokenManager.CloudCliTokenManager;
+        const enabled = !flags.disable;
+        yield* secrets.set(
+          PUBLISH_AGENT_ACTIVITY_SECRET,
+          stringToBytes(enabled ? "true" : "false"),
+        );
+        if (!enabled) {
+          // If enabling scheduled a publish-only link that hasn't been
+          // provisioned yet, disabling must cancel it too — otherwise the next
+          // start still links an environment whose only purpose was publishing.
+          // A pending managed link is left alone; it exists for the tunnel.
+          const linkedNow = Option.isSome(yield* secrets.get(CLOUD_LINKED_USER_ID));
+          if (!linkedNow && (yield* CliState.readCliDesiredLinkMode) === "publish_only") {
+            yield* CliState.setCliDesiredCloudLink(false);
+            yield* Console.log("Cancelled the pending publish-only T3 Connect link.");
+          }
+          yield* Console.log("Publishing agent activity disabled.");
+          return;
+        }
+
+        yield* Console.log("Publishing agent activity enabled.");
+        const linked = Option.isSome(yield* secrets.get(CLOUD_LINKED_USER_ID));
+        if (linked) {
+          return;
+        }
+
+        if (!(yield* tokens.hasCredential)) {
+          yield* Console.log(
+            "Run `t3 connect login` first so this environment can be authorized to publish.",
+          );
+          return;
+        }
+        // A link may already be desired (e.g. `t3 connect link` before the
+        // server's first start). Never downgrade it: a desired managed link
+        // also covers publishing, so only request a publish-only link when no
+        // link is pending at all.
+        if (yield* CliState.readCliDesiredCloudLink) {
+          yield* Console.log(
+            "A T3 Connect link is already pending. Start T3 to finish provisioning it; publishing starts once it links.",
+          );
+          return;
+        }
+        yield* CliState.setCliDesiredCloudLink(true, "publish_only");
+        yield* Console.log(
+          "Restart T3 to finish authorizing this environment to publish (no managed tunnel is created).",
+        );
+      }),
     ),
   ),
 );
@@ -456,11 +685,43 @@ const connectLogoutCommand = Command.make("logout", {
   ),
 );
 
-export const connectCommand = Command.make("connect").pipe(
-  Command.withDescription("Manage headless T3 Connect access."),
+export const connectCommand = Command.make("connect", {
+  ...projectLocationFlags,
+  headless: headlessFlag,
+}).pipe(
+  Command.withDescription("Set up T3 Connect for this machine."),
+  Command.withHandler((flags) =>
+    runCloudCommand(
+      flags,
+      Effect.gen(function* () {
+        yield* Console.log("T3 Connect\n");
+        const linked = yield* linkEnvironmentForConnect(flags);
+        if (!linked) {
+          return;
+        }
+        yield* Console.log(`✓ Authorized${connectedAs(linked.identity)}`);
+
+        const background = yield* recoverServiceOnboardingOffer(offerServiceDuringOnboarding);
+        if (background) {
+          const platform = yield* HostProcess.Platform;
+          yield* Console.log(
+            platform === "darwin"
+              ? "\n✓ Background service ready\n\nT3 Code is set to run while you are logged in to this Mac. The server establishes the T3 Connect link on startup."
+              : "\n✓ Background service ready\n\nT3 Code is set to keep running after you log out. The server establishes the T3 Connect link on startup.",
+          );
+          return;
+        }
+        const serveCommand = yield* resolveCliCommand("serve");
+        yield* Console.log(
+          `\nNext\n  Start the server with \`${serveCommand}\` to make this machine reachable.`,
+        );
+      }),
+    ),
+  ),
   Command.withSubcommands([
     connectLoginCommand,
     connectLinkCommand,
+    connectPublishCommand,
     connectStatusCommand,
     connectUnlinkCommand,
     connectLogoutCommand,

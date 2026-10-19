@@ -1,20 +1,19 @@
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import { SymbolView } from "expo-symbols";
 import { TextInputWrapper } from "expo-paste-input";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Pressable, ScrollView, View, useColorScheme, useWindowDimensions } from "react-native";
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
+import { Platform, Pressable, ScrollView, View, useWindowDimensions } from "react-native";
+import { KeyboardAvoidingView, KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import ImageViewing from "react-native-image-viewing";
+import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
 
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
-import { ControlPill } from "../../components/ControlPill";
+import { ControlPill } from "../../components/ui/ControlPill";
 import { cn } from "../../lib/cn";
 import type { DraftComposerImageAttachment } from "../../lib/composerImages";
 import { convertPastedImagesToAttachments, pickComposerImages } from "../../lib/composerImages";
-import { useThemeColor } from "../../lib/useThemeColor";
 import { useNativePaste } from "../../lib/useNativePaste";
 import { setPendingConnectionError } from "../../state/use-remote-environment-registry";
 import { appendReviewCommentToDraft } from "../../state/use-thread-composer-state";
@@ -26,15 +25,10 @@ import {
   useReviewCommentTarget,
 } from "./reviewCommentSelection";
 import { useAppearanceCodeSurface } from "../settings/appearance/useAppearanceCodeSurface";
-import {
-  changeTone,
-  DiffTokenText,
-  REVIEW_MONO_FONT_FAMILY,
-  ReviewChangeBar,
-} from "./reviewDiffRendering";
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
+import { changeTone, DiffTokenText, ReviewChangeBar } from "./reviewDiffRendering";
 import {
   highlightReviewSelectedLines,
-  type ReviewDiffTheme,
   type ReviewHighlightedToken,
 } from "./shikiReviewHighlighter";
 
@@ -46,11 +40,11 @@ type ReviewCommentComposerSheetProps = StaticScreenProps<{
 }>;
 
 export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProps) {
+  const isAndroid = Platform.OS === "android";
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
-  const colorScheme = useColorScheme();
-  const iconTint = String(useThemeColor("--color-icon"));
+  const { themeAppearance: selectedTheme } = useAppearancePreferences();
   const target = useReviewCommentTarget();
   const { codeSurface } = useAppearanceCodeSurface();
   const { environmentId, threadId } = props.route.params;
@@ -59,7 +53,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
     Record<string, ReadonlyArray<ReviewHighlightedToken>>
   >({});
   const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerImageAttachment>>([]);
-  const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
+  const [previewFile, setPreviewFile] = useState<FilePreviewSource | null>(null);
 
   const selectedLines = useMemo(
     () => (target ? getSelectedReviewCommentLines(target) : []),
@@ -69,7 +63,6 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
   const lastLine = selectedLines[selectedLines.length - 1] ?? null;
   const firstNumber = firstLine ? getReviewUnifiedLineNumber(firstLine) : null;
   const lastNumber = lastLine ? getReviewUnifiedLineNumber(lastLine) : null;
-  const selectedTheme = (colorScheme === "dark" ? "dark" : "light") satisfies ReviewDiffTheme;
   const canSubmit =
     commentText.trim().length > 0 && target !== null && !!environmentId && !!threadId;
   const selectionLabel =
@@ -143,15 +136,29 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
     }
   }
 
+  const handleSubmit = useCallback(() => {
+    if (!target || !environmentId || !threadId || commentText.trim().length === 0) {
+      return;
+    }
+
+    appendReviewCommentToDraft({
+      environmentId,
+      threadId,
+      text: formatReviewCommentContext(target, commentText),
+      attachments,
+    });
+    setAttachments([]);
+    dismissComposer();
+  }, [attachments, commentText, dismissComposer, environmentId, target, threadId]);
+
   return (
-    <View style={{ flex: 1 }}>
-      <KeyboardAvoidingView automaticOffset behavior="padding" style={{ flex: 1 }}>
+    <View className="flex-1 bg-sheet">
+      <KeyboardAvoidingView automaticOffset behavior="padding" className="flex-1">
         <View
+          className="flex-1 px-5"
           style={{
-            flex: 1,
-            paddingHorizontal: 20,
-            paddingTop: 8,
-            paddingBottom: target ? 0 : Math.max(insets.bottom, 18),
+            paddingTop: isAndroid ? insets.top + 8 : 8,
+            paddingBottom: target ? (isAndroid ? 72 : 0) : Math.max(insets.bottom, 18),
           }}
         >
           <View className="flex-row items-center justify-between py-2">
@@ -159,7 +166,12 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
               className="bg-subtle h-12 w-12 items-center justify-center rounded-full"
               onPress={dismissComposer}
             >
-              <SymbolView name="xmark" size={18} tintColor={iconTint} type="monochrome" />
+              <SymbolView
+                name="xmark"
+                size={18}
+                tintColorClassName={"accent-icon"}
+                type="monochrome"
+              />
             </Pressable>
 
             <Text className="text-lg font-t3-bold text-foreground">Add Comment</Text>
@@ -217,10 +229,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
                             style={{ height: codeSurface.rowHeight }}
                           >
                             <ReviewChangeBar change={line.change} height={codeSurface.rowHeight} />
-                            <Text
-                              className="w-9 py-1 pr-1 text-right text-2xs font-t3-medium text-foreground-muted"
-                              style={{ fontFamily: REVIEW_MONO_FONT_FAMILY }}
-                            >
+                            <Text className="w-9 py-1 pr-1 text-right text-2xs font-mono text-foreground-muted">
                               {lineNumber ?? ""}
                             </Text>
                             <View className="min-w-0 flex-1 shrink-0 px-1 py-1">
@@ -253,8 +262,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
                         textAlignVertical="top"
                         value={commentText}
                         onChangeText={setCommentText}
-                        className="h-full flex-1 border-0 bg-transparent px-0 py-0 font-sans text-base"
-                        style={{ flex: 1, minHeight: 0 }}
+                        className="h-full min-h-0 flex-1 border-0 bg-transparent px-0 py-0 font-sans text-base"
                       />
                     </TextInputWrapper>
                   </View>
@@ -264,7 +272,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
                         attachments={attachments}
                         imageBorderRadius={16}
                         imageSize={60}
-                        onPressImage={setPreviewImageUri}
+                        onPressPreview={setPreviewFile}
                         removeButtonPlacement="gutter"
                         onRemove={(imageId) => {
                           setAttachments((current) =>
@@ -279,7 +287,7 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
             </View>
           )}
         </View>
-        {target ? (
+        {!isAndroid && target ? (
           <View className="flex-row items-center gap-3 bg-sheet px-5 py-2">
             <ControlPill
               accessibilityLabel="Add image"
@@ -293,32 +301,38 @@ export function ReviewCommentComposerSheet(props: ReviewCommentComposerSheetProp
               label="Comment"
               variant="primary"
               disabled={!canSubmit}
-              onPress={() => {
-                if (!target || !environmentId || !threadId || commentText.trim().length === 0) {
-                  return;
-                }
-
-                appendReviewCommentToDraft({
-                  environmentId,
-                  threadId,
-                  text: formatReviewCommentContext(target, commentText),
-                  attachments,
-                });
-                setAttachments([]);
-                dismissComposer();
-              }}
+              onPress={handleSubmit}
             />
           </View>
         ) : null}
       </KeyboardAvoidingView>
-      <ImageViewing
-        images={previewImageUri ? [{ uri: previewImageUri }] : []}
-        imageIndex={0}
-        visible={previewImageUri !== null}
-        onRequestClose={() => setPreviewImageUri(null)}
-        swipeToCloseEnabled
-        doubleTapToZoomEnabled
-      />
+      {isAndroid && target ? (
+        <KeyboardStickyView
+          className="absolute inset-x-0 bottom-0"
+          offset={{ closed: 0, opened: 0 }}
+        >
+          <View
+            className="flex-row items-center gap-3 border-t border-border bg-sheet px-5 pt-2"
+            style={{ paddingBottom: Math.max(insets.bottom, 10) }}
+          >
+            <ControlPill
+              accessibilityLabel="Add image"
+              icon="plus"
+              onPress={() => void handlePickImages()}
+            />
+            <View className="flex-1" />
+            <ControlPill
+              accessibilityLabel="Comment"
+              icon="arrow.up"
+              label="Comment"
+              variant="primary"
+              disabled={!canSubmit}
+              onPress={handleSubmit}
+            />
+          </View>
+        </KeyboardStickyView>
+      ) : null}
+      <FilePreviewModal source={previewFile} onRequestClose={() => setPreviewFile(null)} />
     </View>
   );
 }

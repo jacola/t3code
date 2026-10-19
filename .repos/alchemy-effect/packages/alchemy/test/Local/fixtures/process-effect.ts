@@ -3,8 +3,8 @@ import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as ChildProcess from "effect/unstable/process/ChildProcess";
-import type { ChildProcessHandle } from "effect/unstable/process/ChildProcessSpawner";
+import * as ChildProcess from "effect/process/ChildProcess";
+import type { ChildProcessHandle } from "effect/process/ChildProcessSpawner";
 
 /**
  * Wait for the child to exit (with timeout). Uses `handle.isRunning`
@@ -58,21 +58,50 @@ export const isAlive = (pid: number): Effect.Effect<boolean> =>
 
 /**
  * Resolves the pid currently LISTENing on the port of `wsUrl`. Uses an
- * `lsof` invocation; we don't own a handle to whatever process is
- * listening so there's no ChildProcessHandle equivalent.
+ * `lsof` invocation (`netstat -ano` on Windows, which has no `lsof`); we
+ * don't own a handle to whatever process is listening so there's no
+ * ChildProcessHandle equivalent.
  */
-export const pidListeningOn = (wsUrl: string) =>
-  ChildProcess.make(
-    "lsof",
-    ["-iTCP:" + new URL(wsUrl).port, "-sTCP:LISTEN", "-t"],
-    {
+export const pidListeningOn = (wsUrl: string) => {
+  const port = new URL(wsUrl).port;
+  if (process.platform === "win32") {
+    return ChildProcess.make("netstat", ["-ano", "-p", "TCP"], {
       stdout: "pipe",
-    },
-  ).pipe(
+    }).pipe(
+      Effect.flatMap((handle) =>
+        handle.stdout.pipe(Stream.decodeText, Stream.mkString),
+      ),
+      Effect.map((stdout) => {
+        // Columns: Proto | Local Address | Foreign Address | State | PID
+        const line = stdout
+          .split("\n")
+          .find((l) => l.includes("LISTENING") && l.includes(`:${port} `));
+        return Number.parseInt(line?.trim().split(/\s+/).at(-1) ?? "", 10);
+      }),
+    );
+  }
+  return ChildProcess.make("lsof", [`-iTCP:${port}`, "-sTCP:LISTEN", "-t"], {
+    stdout: "pipe",
+  }).pipe(
     Effect.flatMap((handle) =>
       handle.stdout.pipe(Stream.decodeText, Stream.mkString),
     ),
     Effect.map((stdout) => Number.parseInt(stdout.trim().split("\n")[0]!, 10)),
+  );
+};
+
+/**
+ * POSIX process-group id of a pid via `ps` (no Node API exposes another
+ * process's pgid). Returns NaN when the pid is gone.
+ */
+export const pgidOf = (pid: number) =>
+  ChildProcess.make("ps", ["-o", "pgid=", "-p", String(pid)], {
+    stdout: "pipe",
+  }).pipe(
+    Effect.flatMap((handle) =>
+      handle.stdout.pipe(Stream.decodeText, Stream.mkString),
+    ),
+    Effect.map((stdout) => Number.parseInt(stdout.trim(), 10)),
   );
 
 /** Send a signal to a pid we don't own a handle to. */

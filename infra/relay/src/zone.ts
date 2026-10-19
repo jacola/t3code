@@ -21,9 +21,9 @@ function withLogicalId<Resource extends object>(resource: Resource, logicalId: s
 
 export const RelayDeploymentConfig = Effect.gen(function* () {
   const { stage } = yield* Alchemy.Stack;
-  const relayApiZoneName = yield* Config.nonEmptyString("RELAY_API_ZONE_NAME");
-  const managedEndpointZoneName = yield* Config.nonEmptyString("RELAY_TUNNEL_ZONE_NAME");
-  const relayPublicDomainOverride = yield* Config.string("RELAY_DOMAIN").pipe(
+  const relayApiZoneName = yield* Config.NonEmptyString("RELAY_API_ZONE_NAME");
+  const managedEndpointZoneName = yield* Config.NonEmptyString("RELAY_TUNNEL_ZONE_NAME");
+  const relayPublicDomainOverride = yield* Config.String("RELAY_DOMAIN").pipe(
     Config.option,
     Config.map(
       Option.flatMap((value) => {
@@ -48,8 +48,10 @@ export const RelayDeploymentConfig = Effect.gen(function* () {
 export const ManagedEndpointZone = RelayDeploymentConfig.pipe(
   Effect.flatMap(({ stage, managedEndpointZoneName }) =>
     relayOwnsManagedEndpointZone(stage)
-      ? Cloudflare.Zone("ManagedEndpointZone", { name: managedEndpointZoneName }).pipe(adopt(true))
-      : Cloudflare.Zone.ref("ManagedEndpointZone", {
+      ? Cloudflare.Zone.Zone("ManagedEndpointZone", { name: managedEndpointZoneName }).pipe(
+          adopt(true),
+        )
+      : Cloudflare.Zone.Zone.ref("ManagedEndpointZone", {
           stage: MANAGED_ENDPOINT_ZONE_OWNER_STAGE,
         }).pipe(
           // Alchemy beta's DNS binding policy uses LogicalId to derive a
@@ -64,8 +66,8 @@ export const RelayApiZone = RelayDeploymentConfig.pipe(
     relayApiZoneName === managedEndpointZoneName
       ? ManagedEndpointZone
       : relayOwnsManagedEndpointZone(stage)
-        ? Cloudflare.Zone("RelayApiZone", { name: relayApiZoneName }).pipe(adopt(true))
-        : Cloudflare.Zone.ref("RelayApiZone", {
+        ? Cloudflare.Zone.Zone("RelayApiZone", { name: relayApiZoneName }).pipe(adopt(true))
+        : Cloudflare.Zone.Zone.ref("RelayApiZone", {
             stage: MANAGED_ENDPOINT_ZONE_OWNER_STAGE,
           }),
   ),
