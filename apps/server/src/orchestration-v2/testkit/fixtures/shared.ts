@@ -381,6 +381,12 @@ export const PI_MODEL_SELECTION = {
   model: "openrouter/deepseek/deepseek-v4-flash",
 } satisfies ModelSelection;
 
+export const COPILOT_MODEL_SELECTION = {
+  instanceId: ProviderInstanceId.make("githubCopilot"),
+  // Included in every Copilot plan without premium requests.
+  model: "gpt-5-mini",
+} satisfies ModelSelection;
+
 export const ACP_REGISTRY_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("acpRegistry"),
   model: "default",

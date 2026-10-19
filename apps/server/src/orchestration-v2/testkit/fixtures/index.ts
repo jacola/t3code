@@ -116,6 +116,7 @@ import {
 import { assertOpenCodePlanQuestionsOutput } from "./plan_questions/opencode_output.ts";
 import { planQuestionsInput } from "./plan_questions/input.ts";
 import { assertProposedPlanOutput } from "./proposed_plan/codex_output.ts";
+import { assertProposedPlanCopilotOutput } from "./proposed_plan/copilot_output.ts";
 import { assertProposedPlanCursorOutput } from "./proposed_plan/cursor_output.ts";
 import { proposedPlanInput } from "./proposed_plan/input.ts";
 import { assertQueuedCancelledWhileActiveOutput } from "./queued_cancelled_while_active/codex_output.ts";
@@ -167,6 +168,7 @@ import {
   toolCallDeniedWriteInput,
 } from "./tool_call_denied_write/input.ts";
 import { assertToolCallReadOnlyClaudeOutput } from "./tool_call_read_only/claude_output.ts";
+import { assertToolCallReadOnlyCopilotOutput } from "./tool_call_read_only/copilot_output.ts";
 import { assertToolCallReadOnlyCursorOutput } from "./tool_call_read_only/cursor_output.ts";
 import { toolCallReadOnlyInput } from "./tool_call_read_only/input.ts";
 import {
@@ -202,6 +204,7 @@ import { assertWebSearchOutput } from "./web_search/codex_output.ts";
 import { webSearchInput } from "./web_search/input.ts";
 import {
   ACP_REGISTRY_MODEL_SELECTION,
+  COPILOT_MODEL_SELECTION,
   CLAUDE_MODEL_SELECTION,
   CODEX_MODEL_SELECTION,
   CURSOR_MODEL_SELECTION,
@@ -648,6 +651,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         assertOutput: assertSimpleOutput,
       },
       {
+        driver: ProviderDriverKind.make("githubCopilot"),
+        transcriptFile: new URL("./simple/copilot_transcript.ndjson", import.meta.url),
+        modelSelection: COPILOT_MODEL_SELECTION,
+        assertOutput: assertSimpleOutput,
+      },
+      {
         driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL("./simple/opencode_transcript.ndjson", import.meta.url),
         modelSelection: OPENCODE_MODEL_SELECTION,
@@ -731,6 +740,13 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
         assertOutput: assertToolCallReadOnlyCursorOutput,
       },
+      {
+        driver: ProviderDriverKind.make("githubCopilot"),
+        transcriptFile: new URL("./tool_call_read_only/copilot_transcript.ndjson", import.meta.url),
+        modelSelection: COPILOT_MODEL_SELECTION,
+        runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
+        assertOutput: assertToolCallReadOnlyCopilotOutput,
+      },
     ],
   },
   {
@@ -775,6 +791,16 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
           import.meta.url,
         ),
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
+        runtimePolicyOverride: READ_ONLY_ON_REQUEST_POLICY,
+        assertOutput: assertToolCallReadOnlyOnRequestOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("githubCopilot"),
+        transcriptFile: new URL(
+          "./tool_call_read_only_on_request/copilot_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: COPILOT_MODEL_SELECTION,
         runtimePolicyOverride: READ_ONLY_ON_REQUEST_POLICY,
         assertOutput: assertToolCallReadOnlyOnRequestOutput,
       },
@@ -1229,6 +1255,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         assertOutput: assertMultiTurnOutput,
       },
       {
+        driver: ProviderDriverKind.make("githubCopilot"),
+        transcriptFile: new URL("./multi_turn/copilot_transcript.ndjson", import.meta.url),
+        modelSelection: COPILOT_MODEL_SELECTION,
+        assertOutput: assertMultiTurnOutput,
+      },
+      {
         driver: ProviderDriverKind.make("pi"),
         transcriptFile: new URL("./multi_turn/pi_transcript.ndjson", import.meta.url),
         modelSelection: PI_MODEL_SELECTION,
@@ -1379,6 +1411,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
         assertOutput: assertQueuedTurnOutput,
       },
+      {
+        driver: ProviderDriverKind.make("githubCopilot"),
+        transcriptFile: new URL("./queued_turn/copilot_transcript.ndjson", import.meta.url),
+        modelSelection: COPILOT_MODEL_SELECTION,
+        assertOutput: assertQueuedTurnOutput,
+      },
     ],
   },
   {
@@ -1476,6 +1514,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
         assertOutput: assertProposedPlanCursorOutput,
       },
+      {
+        driver: ProviderDriverKind.make("githubCopilot"),
+        transcriptFile: new URL("./proposed_plan/copilot_transcript.ndjson", import.meta.url),
+        modelSelection: COPILOT_MODEL_SELECTION,
+        assertOutput: assertProposedPlanCopilotOutput,
+      },
     ],
   },
   {
@@ -1510,6 +1554,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         driver: ProviderDriverKind.make("acpRegistry"),
         transcriptFile: new URL("./message_steering/registry_transcript.ndjson", import.meta.url),
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
+        assertOutput: assertGrokMessageSteeringOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("githubCopilot"),
+        transcriptFile: new URL("./message_steering/copilot_transcript.ndjson", import.meta.url),
+        modelSelection: COPILOT_MODEL_SELECTION,
         assertOutput: assertGrokMessageSteeringOutput,
       },
       {
@@ -1549,6 +1599,13 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         driver: ProviderDriverKind.make("acpRegistry"),
         transcriptFile: new URL("./turn_interrupt/registry_transcript.ndjson", import.meta.url),
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
+        runtimePolicyOverride: WORKSPACE_NEVER_POLICY,
+        assertOutput: assertTurnInterruptOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("githubCopilot"),
+        transcriptFile: new URL("./turn_interrupt/copilot_transcript.ndjson", import.meta.url),
+        modelSelection: COPILOT_MODEL_SELECTION,
         runtimePolicyOverride: WORKSPACE_NEVER_POLICY,
         assertOutput: assertTurnInterruptOutput,
       },
