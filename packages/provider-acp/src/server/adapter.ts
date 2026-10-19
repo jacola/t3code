@@ -89,7 +89,11 @@ import {
   resolveEmbeddedTerminalContent,
   type AcpClientTerminals,
 } from "./clientTerminals.ts";
-import { ACP_EMPTY_OPTION_VALUE, ACP_SESSION_MODE_OPTION_ID } from "./sessionConfig.ts";
+import {
+  ACP_EMPTY_OPTION_VALUE,
+  ACP_SESSION_MODE_OPTION_ID,
+  isAcpPlanModeId,
+} from "./sessionConfig.ts";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 import {
   t3AcpPromptWithInstructions,
@@ -5971,8 +5975,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 })),
               });
             }
-            const planMode = effectiveModeState?.availableModes.find(
-              (mode) => mode.id === "plan" || mode.id === "architect",
+            const planMode = effectiveModeState?.availableModes.find((mode) =>
+              isAcpPlanModeId(mode.id),
             );
             if (planMode !== undefined && effectiveModeState?.currentModeId !== planMode.id) {
               yield* runtime.setMode(planMode.id);
@@ -5981,9 +5985,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const choices = option.options.flatMap((entry) =>
                 "value" in entry ? [entry.value] : entry.options.map((choice) => choice.value),
               );
-              const requested = choices.find(
-                (choice) => choice === "plan" || choice === "architect",
-              );
+              const requested = choices.find((choice) => isAcpPlanModeId(choice));
               if (requested !== undefined && option.currentValue !== requested) {
                 yield* runtime.setConfigOption(option.id, requested);
               }

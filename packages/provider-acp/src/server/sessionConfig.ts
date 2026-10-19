@@ -12,6 +12,15 @@ export const ACP_SESSION_MODE_OPTION_ID = "_t3/session-mode";
  */
 export const ACP_EMPTY_OPTION_VALUE = "_t3/empty";
 
+/**
+ * Agents name their plan mode `plan` or `architect`, or use the ACP spec's
+ * mode URL (`https://agentclientprotocol.com/protocol/session-modes#plan`).
+ */
+export function isAcpPlanModeId(id: string | null | undefined): boolean {
+  if (typeof id !== "string") return false;
+  return id === "plan" || id === "architect" || id.endsWith("/session-modes#plan");
+}
+
 const MAX_OPTION_DESCRIPTORS = 16;
 const MAX_OPTION_CHOICES = 64;
 const MAX_TEXT_LENGTH = 256;
