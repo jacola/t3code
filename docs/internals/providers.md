@@ -44,6 +44,20 @@ its user-global skill directories under that profile, so the profile links those
 back to the user's real `~/.gemini`; MCP servers, hooks, and rules there stay out of the profile.
 See [profile isolation](../../apps/server/src/provider/antigravityAuthSupport.ts).
 
+GitHub Copilot keeps each instance's sign-in, settings, and sessions in its own `COPILOT_HOME`.
+`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_TOKEN` outrank Copilot's saved login, so the launch
+environment drops them unless the instance configures one itself; otherwise a token exported for
+`gh` would silently switch the account and billing. `COPILOT_ALLOW_ALL` and
+`COPILOT_ASSISTED_APPROVAL` are always removed because they would widen every permission mode.
+Without its own login Copilot falls back to `gh`'s sign-in, which status checks cannot confirm
+without a session, so they report it as unknown. Copilot lists models, per-model reasoning
+levels, and custom agents only inside a session, so health checks read the version and the
+signed-in account from `config.json`, and the model catalog is learned from live sessions and
+explicit refreshes and kept on disk per instance. Permission modes are launch flags, and an
+explicit approval or sandbox policy launches Copilot asking so T3's check sees every request. See
+the [environment](../../packages/provider-copilot/src/server/acpSupport.ts) and
+[catalog](../../packages/provider-copilot/src/server/catalog.ts).
+
 The [Antigravity installer](../../apps/server/src/provider/AntigravityInstallation.ts) outlives
 client connections and provider-instance rebuilds. Releases are immutable, with an atomic pointer
 selecting the version for new processes. Running processes hold leases on their version. Updates
