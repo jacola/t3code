@@ -36,6 +36,7 @@
     "@noble/hashes": "catalog:",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/provider-acp": "workspace:*",
+    "@t3tools/provider-copilot": "workspace:*",
     "@t3tools/provider-core": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "effect": "catalog:"

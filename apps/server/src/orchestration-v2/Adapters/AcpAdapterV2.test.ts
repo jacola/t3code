@@ -1,10 +1,12 @@
 import {
-  extractCopilotSubagentUpdate,
-  makeCopilotSubagentRouting,
   normalizeDevinSessionUpdate,
   normalizeDevinToolCall,
   extractDevinSubagentUpdate,
 } from "@t3tools/provider-acp-registry/testing";
+import {
+  extractCopilotSubagentUpdate,
+  makeCopilotSubagentRouting,
+} from "@t3tools/provider-copilot/testing";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";

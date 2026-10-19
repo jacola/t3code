@@ -6,6 +6,7 @@ import {
 } from "@t3tools/contracts";
 import { acpRegistryClient } from "@t3tools/provider-acp-registry/client";
 import { makeProviderClientRegistry } from "@t3tools/provider-core/client";
+import { copilotClient } from "@t3tools/provider-copilot/client";
 import { cursorClient } from "@t3tools/provider-cursor/client";
 import { grokClient } from "@t3tools/provider-grok/client";
 import { museClient } from "@t3tools/provider-muse/client";
@@ -25,6 +26,7 @@ export const providerClients = makeProviderClientRegistry([
   },
   cursorClient,
   grokClient,
+  copilotClient,
   openCodeClient,
   {
     driverKind: ProviderDriverKind.make("antigravity"),

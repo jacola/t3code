@@ -40,6 +40,11 @@ export const PROVIDER_PRESENTATION = {
     color: "#4d9f8a",
     driverKind: ProviderDriverKind.make("pi"),
   },
+  copilot: {
+    label: "GitHub Copilot",
+    color: "#8250df",
+    driverKind: ProviderDriverKind.make("githubCopilot"),
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 export const PROVIDER_ORDER = Object.keys(PROVIDER_PRESENTATION) as UsageProviderKind[];

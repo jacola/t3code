@@ -3444,6 +3444,7 @@ it.layer(
               "claudeAgent",
               "codex",
               "cursor",
+              "githubCopilot",
               "grok",
               "muse",
               "opencode",
