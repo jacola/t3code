@@ -10,7 +10,8 @@ history.
    running the T3 Code server, for example with `brew install copilot-cli` or
    `npm install -g @github/copilot`. T3 Code supports Copilot CLI 1.0.98 or newer.
 2. Run `copilot login`.
-3. Open **Settings → Providers**, enable GitHub Copilot, and choose **Refresh models**.
+3. Open **Settings → Providers**, enable GitHub Copilot, and select **Refresh provider status**
+   (the refresh icon above the provider list).
 
 If `copilot` is not on the server's `PATH`, set its **Binary path**. To keep a second account
 separate, add another GitHub Copilot provider and give it its own **COPILOT_HOME path**, then
@@ -26,7 +27,8 @@ OAuth token from the Copilot CLI or GitHub CLI.
 
 Health checks read the CLI version and the signed-in account without starting a Copilot session,
 so they never start your MCP servers or hooks. Copilot only lists its models inside a session.
-T3 Code learns them from **Refresh models**, which opens one short session, and from your threads.
+T3 Code learns them when you select **Refresh provider status**, which opens one short session,
+and from your threads.
 
 ## Models
 

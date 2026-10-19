@@ -78,7 +78,8 @@ describe("withCopilotCatalog", () => {
       {
         models: [],
         slashCommands: [],
-        message: "Signed in. Refresh models or start a thread to load your Copilot model list.",
+        message:
+          "Signed in. Refresh provider status or start a thread to load your Copilot model list.",
       },
       {
         models: [{ slug: "model-a", name: "Model A", isCustom: false, capabilities: null }],

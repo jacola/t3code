@@ -54,7 +54,7 @@ const EMPTY_CAPABILITIES = createModelCapabilities({ optionDescriptors: [] });
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const SKILLS_PROBE_TIMEOUT_MS = 4_000;
 const MODELS_PENDING_MESSAGE =
-  "Signed in. Refresh models or start a thread to load your Copilot model list.";
+  "Signed in. Refresh provider status or start a thread to load your Copilot model list.";
 
 const AUTO_MODEL: ServerProviderModel = {
   slug: COPILOT_AUTO_MODEL_SLUG,
