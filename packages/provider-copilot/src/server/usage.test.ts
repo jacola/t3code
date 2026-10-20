@@ -73,4 +73,20 @@ describe("parseCopilotUsageLine", () => {
     );
     expect(record?.dedupeKey).toBe("copilot:event-9");
   });
+
+  it("reports Copilot's billed AI credits as dollars, except for BYOK", () => {
+    const billed = {
+      model: "model-a",
+      inputTokens: 10,
+      outputTokens: 5,
+      // 371.328 AI credits at $0.01 each.
+      copilotUsage: { totalNanoAiu: 371_328_000_000 },
+    };
+    const [record] = parseCopilotUsageLine(usageRecord(billed), { sessionId: "" });
+    expect(record?.reportedCostUsd).toBeCloseTo(3.71328, 10);
+    const [byok] = parseCopilotUsageLine(usageRecord({ ...billed, isByok: true }), {
+      sessionId: "",
+    });
+    expect(byok?.reportedCostUsd).toBeNull();
+  });
 });

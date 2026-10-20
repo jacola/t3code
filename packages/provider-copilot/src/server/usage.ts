@@ -27,9 +27,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// GitHub bills 1 AI credit as $0.01, and the log records billions of a credit.
+const USD_PER_NANO_AI_CREDIT = 0.01 / 1e9;
+
+/**
+ * Copilot's `cost` is a premium-request multiplier, not dollars. Its billed
+ * charge is `copilotUsage.totalNanoAiu`, absent for BYOK requests GitHub does
+ * not bill.
+ */
+function copilotReportedCostUsd(usage: Record<string, unknown>): number | null {
+  if (usage.isByok === true || !isRecord(usage.copilotUsage)) return null;
+  const nanoAiu = usage.copilotUsage.totalNanoAiu;
+  return typeof nanoAiu === "number" && Number.isFinite(nanoAiu) && nanoAiu >= 0
+    ? nanoAiu * USD_PER_NANO_AI_CREDIT
+    : null;
+}
+
 /**
  * `session.start` names the session; each `session.usage_record` is one model
- * request. Copilot's `cost` is a premium-request multiplier, not dollars.
+ * request.
  */
 function parseCopilotUsageRecord(
   parsed: unknown,
@@ -68,7 +84,7 @@ function parseCopilotUsageRecord(
       model,
       sessionId: state.sessionId,
       totals,
-      reportedCostUsd: null,
+      reportedCostUsd: copilotReportedCostUsd(usage),
       speed: "standard",
       dedupeKey: apiCallId || recordId ? `copilot:${apiCallId || recordId}` : null,
     },
@@ -103,6 +119,8 @@ const copilotUsageFormat: TranscriptUsageFormat<CopilotUsageScanState> = {
         cacheWriteTokens: true,
         reasoningTokens: true,
         apiCallId: true,
+        isByok: true,
+        copilotUsage: { totalNanoAiu: true },
       },
     },
   },

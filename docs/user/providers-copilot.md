@@ -69,8 +69,10 @@ sandbox policy also starts Copilot in **Supervised**, so every request reaches t
 ## Usage
 
 **Usage** includes Copilot's per-request token counts from each account's
-`session-state` history. Copilot reports premium-request multipliers rather than prices, so costs
-are estimated from public model rates where T3 Code knows them.
+`session-state` history. Costs are the AI credits GitHub billed for each request, shown in
+dollars at $0.01 per credit. Bring-your-own-key requests are not billed by GitHub, so they are
+estimated from public model rates where T3 Code knows them. For usage across every Copilot
+surface, not only T3 Code, see your GitHub billing settings.
 
 ## Limits
 
