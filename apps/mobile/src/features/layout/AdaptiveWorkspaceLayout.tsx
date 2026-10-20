@@ -17,6 +17,7 @@ import {
   use,
   useEffect,
   useEffectEvent,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -62,6 +63,7 @@ import { AndroidHomeFabLayout } from "../home/AndroidHomeFab";
 import { AndroidWorkspaceSidebar } from "../workspace/AndroidWorkspaceSidebar";
 import { useAndroidWorkspaceSelection } from "../workspace/useAndroidWorkspaceSelection";
 import { HomeListOptionsProvider } from "../home/home-list-options";
+import { usePendingTaskListActions } from "../home/usePendingTaskListActions";
 import { ThreadNavigationSidebar } from "../threads/ThreadNavigationSidebar";
 import { useOpenThreadPullRequests } from "../threads/use-open-thread-pull-requests";
 import { RenderErrorBoundary, RenderFailureView } from "../../components/RenderErrorBoundary";
@@ -247,7 +249,14 @@ function AdaptiveWorkspaceLayoutContent(
   const [primarySidebarSearchQuery, setPrimarySidebarSearchQuery] = useState("");
   const [focusedAuxiliaryPaneRole, setFocusedAuxiliaryPaneRole] =
     useState<WorkspaceAuxiliaryPaneRole | null>(null);
-  const baseLayout = deriveLayout({ width: viewportWidth, height, nativeMetrics });
+  // The compiler can't memoize these derivations: they stay live across later hook calls. Fresh
+  // objects here change the workspace context on every render, so every workspace screen
+  // re-renders on any layout state change, and the inspector registration then loops: each
+  // re-register re-renders its screen, which hands over a new inspector renderer.
+  const baseLayout = useMemo(
+    () => deriveLayout({ width: viewportWidth, height, nativeMetrics }),
+    [height, viewportWidth, nativeMetrics],
+  );
   const primarySidebarPinned = isPrimarySidebarPinned({
     pathname,
     nativeWorkspace,
@@ -260,17 +269,30 @@ function AdaptiveWorkspaceLayoutContent(
     setHinge(next);
     setWindowHinge(nextWindow);
   };
-  const layout = alignListPaneToHinge({ layout: baseLayout, hinge, viewportWidth });
+  const layout = useMemo(
+    () => alignListPaneToHinge({ layout: baseLayout, hinge, viewportWidth }),
+    [baseLayout, hinge, viewportWidth],
+  );
   const shouldRenderPrimarySidebar = layout.usesSplitView;
-  const fileInspector = deriveFileInspectorPaneLayout({
-    layout,
-    viewportWidth,
-    preferredWidth: fileInspectorPreferredWidth ?? undefined,
-    reservedLeadingWidth:
-      shouldRenderPrimarySidebar && showPrimarySidebar
-        ? (layout.listPaneWidth ?? 0) + (layout.listPaneGap ?? 0)
-        : 0,
-  });
+  const fileInspector = useMemo(
+    () =>
+      deriveFileInspectorPaneLayout({
+        layout,
+        viewportWidth,
+        preferredWidth: fileInspectorPreferredWidth ?? undefined,
+        reservedLeadingWidth:
+          shouldRenderPrimarySidebar && showPrimarySidebar
+            ? (layout.listPaneWidth ?? 0) + (layout.listPaneGap ?? 0)
+            : 0,
+      }),
+    [
+      fileInspectorPreferredWidth,
+      layout,
+      showPrimarySidebar,
+      shouldRenderPrimarySidebar,
+      viewportWidth,
+    ],
+  );
   const auxiliaryPaneRole: WorkspaceAuxiliaryPaneRole =
     focusedAuxiliaryPaneRole ?? (/\/files(?:\/|$)/.test(pathname) ? "inspector" : "supplementary");
   const auxiliaryPanePreferredVisible =
@@ -281,14 +303,25 @@ function AdaptiveWorkspaceLayoutContent(
     auxiliaryPaneRole === "inspector"
       ? fileInspectorPreferredWidth
       : supplementaryPanePreferredWidth;
-  const panes = deriveWorkspacePaneLayout({
-    layout,
-    viewportWidth,
-    primarySidebarPreferredVisible: showPrimarySidebar,
-    auxiliaryPanePreferredVisible,
-    auxiliaryPaneRole,
-    auxiliaryPanePreferredWidth: auxiliaryPanePreferredWidth ?? undefined,
-  });
+  const panes = useMemo(
+    () =>
+      deriveWorkspacePaneLayout({
+        layout,
+        viewportWidth,
+        primarySidebarPreferredVisible: showPrimarySidebar,
+        auxiliaryPanePreferredVisible,
+        auxiliaryPaneRole,
+        auxiliaryPanePreferredWidth: auxiliaryPanePreferredWidth ?? undefined,
+      }),
+    [
+      auxiliaryPanePreferredVisible,
+      auxiliaryPaneRole,
+      auxiliaryPanePreferredWidth,
+      layout,
+      showPrimarySidebar,
+      viewportWidth,
+    ],
+  );
   const activeThread = parseActiveThreadPath(pathname);
   const environmentId = activeThread?.environmentId ?? null;
   const threadId = activeThread?.threadId ?? null;
@@ -417,6 +450,7 @@ function AdaptiveWorkspaceLayoutContent(
   };
 
   const handleOpenThreadPullRequests = useOpenThreadPullRequests();
+  const { openPendingTask: handleOpenPendingTask } = usePendingTaskListActions();
 
   const handleNewThreadOnBranch = (thread: EnvironmentThreadShell) => {
     navigation.navigate("NewTaskSheet", {
@@ -683,6 +717,7 @@ function AdaptiveWorkspaceLayoutContent(
                           onOpenEnvironmentSettings={handleOpenEnvironmentSettings}
                           onNewThreadInProject={handleNewThreadInProject}
                           onNewThreadOnBranch={handleNewThreadOnBranch}
+                          onOpenPendingTask={handleOpenPendingTask}
                           onSelectThread={handleSelectThread}
                           onOpenThreadPullRequests={handleOpenThreadPullRequests}
                           onSearchQueryChange={setPrimarySidebarSearchQuery}
