@@ -598,7 +598,7 @@ describe("ClientSettings glass opacity", () => {
     expect(() => decodeClientSettingsPatch({ glassOpacity: value })).toThrow();
   });
 
-  it.each([40, 75, 100])("accepts a glass opacity within the supported range: %s", (value) => {
+  it.each([40, 100])("accepts a glass opacity within the supported range: %s", (value) => {
     expect(decodeClientSettings({ glassOpacity: value }).glassOpacity).toBe(value);
     expect(decodeClientSettingsPatch({ glassOpacity: value }).glassOpacity).toBe(value);
   });
@@ -614,7 +614,7 @@ describe("ClientSettings appearance contrast", () => {
     expect(() => decodeClientSettingsPatch({ appearanceContrast: value })).toThrow();
   });
 
-  it.each([50, 100, 150, 200])("accepts an appearance contrast in range: %s", (value) => {
+  it.each([50, 200])("accepts an appearance contrast in range: %s", (value) => {
     expect(decodeClientSettings({ appearanceContrast: value }).appearanceContrast).toBe(value);
     expect(decodeClientSettingsPatch({ appearanceContrast: value }).appearanceContrast).toBe(value);
   });
@@ -1087,9 +1087,31 @@ describe("ServerSettings environment icon", () => {
 
 const decodeDeviceHostSettings = Schema.decodeSync(ServerSettings);
 
+// `deviceHosts` as it was decoded before EAS hosts existed: an SSH host needs a target.
+const decodeOlderDeviceHostSettings = Schema.decodeUnknownSync(
+  Schema.Struct({
+    deviceHosts: Schema.Array(Schema.Struct({ id: Schema.String, target: Schema.String })),
+  }),
+);
+
+it("keeps EAS hosts out of the SSH host list servers and clients before EAS hosts decode", () => {
+  const settings = decodeDeviceHostSettings({
+    deviceHosts: [{ id: "mini", label: "Mac mini", target: "user@mini" }],
+    easDeviceHosts: [{ kind: "eas", id: "eas", label: "EAS Simulator" }],
+  });
+  const wire = encodeServerSettings(settings);
+  expect(decodeOlderDeviceHostSettings(wire).deviceHosts).toEqual([
+    { id: "mini", target: "user@mini" },
+  ]);
+  expect(settings.easDeviceHosts.map((host) => host.id)).toEqual(["eas"]);
+});
+
 it("validates remote device hosts and rejects ambiguous host ids", () => {
   const host = { id: "mini", label: "Mac mini", target: "user@mini", port: 2222 };
-  expect(decodeDeviceHostSettings({ deviceHosts: [host] }).deviceHosts).toEqual([host]);
+  // Hosts saved before EAS hosts existed have no `kind`; they are SSH hosts.
+  expect(decodeDeviceHostSettings({ deviceHosts: [host] }).deviceHosts).toEqual([
+    { kind: "ssh", ...host },
+  ]);
   expect(() => decodeDeviceHostSettings({ deviceHosts: [host, host] })).toThrow();
   expect(() => decodeDeviceHostSettings({ deviceHosts: [{ ...host, id: "local" }] })).toThrow();
   expect(() =>

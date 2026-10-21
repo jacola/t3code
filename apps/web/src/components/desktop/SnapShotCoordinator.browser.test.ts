@@ -5,12 +5,14 @@ import {
   type DesktopSnapShotEvent,
   DEFAULT_CLIENT_SETTINGS,
   EnvironmentId,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
-import { act, createElement } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { createElement } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import { act, fakeTimers, render, type Screen } from "../../../test/render";
 
 import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
 import type { DesktopSnapShotBridge } from "../../lib/desktopSnapShot";
@@ -18,11 +20,17 @@ import * as settings from "../../hooks/useSettings";
 import * as newThread from "../../hooks/useHandleNewThread";
 import * as snapShotSound from "../../lib/snapShotSound";
 import { toastManager } from "../ui/toast";
+import * as imageCompression from "../../lib/imageCompression";
+import {
+  questionAttachmentDraftId,
+  trackOpenQuestionAttachmentDraft,
+} from "../../questionAttachments";
 import {
   beginSnapShotAnimationWhenReady,
   deliverSnapShot,
   dismissFailedSnapShot,
   resolveExistingSnapShotTarget,
+  resolveSnapShotAttachmentTarget,
   resolveSnapShotTargetOnce,
   resolveSnapShotDeliveryTarget,
   SnapShotCoordinator,
@@ -38,6 +46,7 @@ import {
 vi.mock(import("../../hooks/useSettings"), { spy: true });
 vi.mock(import("../../hooks/useHandleNewThread"), { spy: true });
 vi.mock(import("../../lib/snapShotSound"), { spy: true });
+vi.mock(import("../../lib/imageCompression"), { spy: true });
 
 const storage = vi.hoisted(() => {
   const values = new Map<string, string>();
@@ -58,7 +67,8 @@ const storage = vi.hoisted(() => {
 const environmentId = EnvironmentId.make("snap-shot-environment");
 const projectRef = scopeProjectRef(environmentId, ProjectId.make("snap-shot-project"));
 
-beforeEach(() => {
+// Tests stub globals and spy on module exports freely; disposing restores all of them.
+function setup(): Disposable {
   storage.clear();
   vi.stubGlobal("localStorage", storage);
   useComposerDraftStore.setState({
@@ -68,17 +78,18 @@ beforeEach(() => {
     stickyModelSelectionByProvider: {},
     stickyActiveProvider: null,
   });
-});
-
-afterEach(() => {
-  dismissAllSnapShotAnimations();
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
-});
+  return {
+    [Symbol.dispose]() {
+      dismissAllSnapShotAnimations();
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    },
+  };
+}
 
 describe("window capture failures", () => {
   it("dismisses an older failed capture without disturbing a newer capture", async () => {
+    using _env = setup();
     const target = DraftId.make("snap-shot-draft");
     const pendingStarts = new Set<string>();
     const soundedIds = new Set(["older", "newer"]);
@@ -105,6 +116,7 @@ describe("window capture failures", () => {
   });
 
   it("does not resurrect a failed capture when its draft becomes ready later", async () => {
+    using _env = setup();
     const target = DraftId.make("snap-shot-draft");
     let resolveTarget: ((target: DraftId) => void) | undefined;
     const targetReady = new Promise<DraftId>((resolve) => {
@@ -125,6 +137,7 @@ describe("window capture failures", () => {
   });
 
   it("keeps global failures dismissing all active and pending captures", async () => {
+    using _env = setup();
     const target = DraftId.make("snap-shot-draft");
     let resolveTarget: ((target: DraftId) => void) | undefined;
     const targetReady = new Promise<DraftId>((resolve) => {
@@ -160,10 +173,7 @@ describe("pending snapshot processing", () => {
     },
   };
   const target = scopeThreadRef(environmentId, ThreadId.make("enabled-thread"));
-  let root: Root;
-  let container: HTMLDivElement;
-
-  function setup(routeThreadRef: typeof target | null = target) {
+  function coordinatorFixture(routeThreadRef: typeof target | null = target) {
     let currentSettings = {
       ...DEFAULT_CLIENT_SETTINGS,
       snapShotEnabled: true,
@@ -204,35 +214,35 @@ describe("pending snapshot processing", () => {
     const sound = vi.spyOn(snapShotSound, "playSnapShotSound").mockImplementation(() => undefined);
     const toast = vi.spyOn(toastManager, "add").mockReturnValue("toast-id");
     vi.stubGlobal("desktopBridge", bridge);
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    const render = () => act(async () => root.render(createElement(SnapShotCoordinator)));
+    let screen: Screen | undefined;
+    // Settings and route changes rerender the same coordinator instead of remounting it.
+    const renderCoordinator = async () => {
+      if (screen) await screen.rerender(createElement(SnapShotCoordinator));
+      // useHandleNewThread is mocked above, so nothing in the coordinator touches the router.
+      else screen = await render(createElement(SnapShotCoordinator), { router: false });
+    };
     return {
       bridge,
       route,
       sound,
       toast,
-      render,
+      render: renderCoordinator,
       setPending: (items: typeof pending) => {
         pending = items;
       },
       setEnabled: async (snapShotEnabled: boolean) => {
         currentSettings = { ...currentSettings, snapShotEnabled };
-        await render();
+        await renderCoordinator();
       },
       emit: (event: DesktopSnapShotEvent) =>
         act(async () => {
           for (const listener of listeners) listener(event);
         }),
+      [Symbol.asyncDispose]: async () => {
+        await screen?.[Symbol.asyncDispose]();
+      },
     };
   }
-
-  afterEach(async () => {
-    await act(async () => root?.unmount());
-    container?.remove();
-  });
 
   const focus = () =>
     act(async () => {
@@ -240,7 +250,8 @@ describe("pending snapshot processing", () => {
     });
 
   it("leaves captures untouched while disabled and resumes them when enabled again", async () => {
-    const fixture = setup();
+    using _env = setup();
+    await using fixture = coordinatorFixture();
     const { bridge, sound, toast } = fixture;
     await fixture.setEnabled(false);
     await focus();
@@ -279,7 +290,8 @@ describe("pending snapshot processing", () => {
   });
 
   it("reports each pending capture failure once, allows a new failure kind, and resets after success", async () => {
-    const fixture = setup(null);
+    using _env = setup();
+    await using fixture = coordinatorFixture(null);
     const { bridge, sound, toast, route } = fixture;
     await fixture.render();
     await focus();
@@ -329,7 +341,8 @@ describe("pending snapshot processing", () => {
   });
 
   it("suppresses deferred failures while disabled and reports fresh failures after re-enable", async () => {
-    const fixture = setup();
+    using _env = setup();
+    await using fixture = coordinatorFixture();
     const { bridge, sound, toast } = fixture;
     let rejectRead: ((error: Error) => void) | undefined;
     bridge.readSnapShot.mockReturnValueOnce(
@@ -396,7 +409,8 @@ describe("pending snapshot processing", () => {
   });
 
   it("keeps a capture pending when disabled during target resolution, then retries on re-enable", async () => {
-    const fixture = setup(null);
+    using _env = setup();
+    await using fixture = coordinatorFixture(null);
     const { bridge, route } = fixture;
     route.defaultProjectRef = projectRef;
     const draftId = DraftId.make("resolving-snapshot");
@@ -424,7 +438,8 @@ describe("pending snapshot processing", () => {
   });
 
   it("finishes and acknowledges delivery already reading when disabled", async () => {
-    const fixture = setup();
+    using _env = setup();
+    await using fixture = coordinatorFixture();
     let finishReading: ((value: typeof capture) => void) | undefined;
     const reading = new Promise<typeof capture>((resolve) => {
       finishReading = resolve;
@@ -459,7 +474,8 @@ describe("window capture delivery", () => {
   ])(
     "preserves capture contents for $target before a stalled animation finishes ($accessibleText)",
     async ({ target, accessibleText }) => {
-      vi.useFakeTimers();
+      using _env = setup();
+      using _timers = fakeTimers();
       const never = new Promise<void>(() => undefined);
       const animationFrames: Array<FrameRequestCallback> = [];
       const acknowledgeSnapShot = vi.fn(async () => undefined);
@@ -537,7 +553,7 @@ describe("window capture delivery", () => {
           }
         });
       });
-      const delivery = deliverSnapShot(bridge, item, target);
+      const delivery = deliverSnapShot(bridge, item, () => target);
       await persisted;
       await vi.advanceTimersByTimeAsync(0);
 
@@ -566,6 +582,7 @@ describe("window capture delivery", () => {
 
 describe("window capture target resolution", () => {
   it("shares bare-route draft creation between animation start and capture drain", async () => {
+    using _env = setup();
     const draftId = DraftId.make("snap-shot-draft");
     let finishResolution: ((target: DraftId) => void) | undefined;
     const resolveTarget = vi.fn(
@@ -587,6 +604,7 @@ describe("window capture target resolution", () => {
   });
 
   it("follows a draft to its promoted server thread", () => {
+    using _env = setup();
     const draftId = DraftId.make("snap-shot-draft");
     const promotedRef = scopeThreadRef(environmentId, ThreadId.make("snap-shot-promoted-thread"));
     const store = useComposerDraftStore.getState();
@@ -599,9 +617,136 @@ describe("window capture target resolution", () => {
   });
 
   it("keeps the routed server thread before its shell loads", () => {
+    using _env = setup();
     const routeThreadRef = scopeThreadRef(environmentId, ThreadId.make("snap-shot-routed-thread"));
 
     expect(resolveExistingSnapShotTarget(routeThreadRef, routeThreadRef)).toEqual(routeThreadRef);
+  });
+});
+
+describe("open question delivery", () => {
+  const threadRef = scopeThreadRef(environmentId, ThreadId.make("question-thread"));
+  const first = questionAttachmentDraftId(environmentId, threadRef.threadId, "request-1", "q1");
+  const second = questionAttachmentDraftId(environmentId, threadRef.threadId, "request-1", "q2");
+  const request = { draftId: first, requestKeys: [first, second] };
+  const capture = {
+    id: "12345678-1234-1234-1234-123456789abc",
+    name: "window.png",
+    mimeType: "image/png" as const,
+    sizeBytes: 3,
+    dataUrl: "data:image/png;base64,AQID",
+    source: {
+      kind: "snap-shot" as const,
+      capturedAt: "2026-09-01T00:00:00.000Z",
+      appName: "Editor",
+      windowTitle: "main.ts",
+    },
+  };
+  const makeBridge = (readSnapShot: () => Promise<typeof capture> = async () => capture) => {
+    const acknowledgeSnapShot = vi.fn(async () => undefined);
+    const bridge = { readSnapShot, acknowledgeSnapShot } as unknown as DesktopSnapShotBridge;
+    return { bridge, acknowledgeSnapShot };
+  };
+
+  it("attaches a capture to the open question draft and leaves the thread draft alone", async () => {
+    using _env = setup();
+    const pins = new Map();
+    const untrack = trackOpenQuestionAttachmentDraft(threadRef, request);
+    try {
+      const { bridge, acknowledgeSnapShot } = makeBridge();
+      await deliverSnapShot(bridge, capture, () =>
+        resolveSnapShotAttachmentTarget(pins, capture.id, threadRef),
+      );
+      const store = useComposerDraftStore.getState();
+      expect(store.getComposerDraft(first)?.images.map(({ id }) => id)).toEqual([capture.id]);
+      expect(store.getComposerDraft(threadRef)?.images ?? []).toHaveLength(0);
+      expect(acknowledgeSnapShot).toHaveBeenCalledExactlyOnceWith(capture.id);
+    } finally {
+      untrack();
+    }
+  });
+
+  it("falls back to the thread when a newer question replaces the pinned one during compression", async () => {
+    using _env = setup();
+    const pins = new Map();
+    const untrackFirst = trackOpenQuestionAttachmentDraft(threadRef, request);
+    let untrackSecond = () => {};
+    const compression = vi
+      .spyOn(imageCompression, "compressImageToByteLimit")
+      .mockImplementationOnce(async (file) => {
+        untrackSecond = trackOpenQuestionAttachmentDraft(threadRef, {
+          ...request,
+          draftId: second,
+        });
+        untrackFirst();
+        return { ok: true, file, recompressed: false };
+      });
+    try {
+      const { bridge, acknowledgeSnapShot } = makeBridge();
+      const resolveTarget = () => resolveSnapShotAttachmentTarget(pins, capture.id, threadRef);
+      expect(resolveTarget()).toBe(first);
+      await deliverSnapShot(bridge, capture, resolveTarget);
+      const store = useComposerDraftStore.getState();
+      expect(store.getComposerDraft(first)?.images ?? []).toHaveLength(0);
+      expect(store.getComposerDraft(second)?.images ?? []).toHaveLength(0);
+      expect(store.getComposerDraft(threadRef)?.images.map(({ id }) => id)).toEqual([capture.id]);
+      expect(acknowledgeSnapShot).toHaveBeenCalledExactlyOnceWith(capture.id);
+    } finally {
+      compression.mockRestore();
+      untrackFirst();
+      untrackSecond();
+    }
+  });
+
+  it("keeps a capture pinned before any question off a question that opens during the read", async () => {
+    using _env = setup();
+    const pins = new Map();
+    const resolveTarget = () => resolveSnapShotAttachmentTarget(pins, capture.id, threadRef);
+    // The drain pins a capture it never saw requested before reading it.
+    expect(resolveTarget()).toEqual(threadRef);
+    let untrack = () => {};
+    const { bridge, acknowledgeSnapShot } = makeBridge(async () => {
+      untrack = trackOpenQuestionAttachmentDraft(threadRef, request);
+      return capture;
+    });
+    try {
+      await deliverSnapShot(bridge, capture, resolveTarget);
+      const store = useComposerDraftStore.getState();
+      expect(store.getComposerDraft(first)?.images ?? []).toHaveLength(0);
+      expect(store.getComposerDraft(threadRef)?.images.map(({ id }) => id)).toEqual([capture.id]);
+      expect(acknowledgeSnapShot).toHaveBeenCalledExactlyOnceWith(capture.id);
+    } finally {
+      untrack();
+    }
+  });
+
+  it("refuses a capture once the request's other questions hold the shared limit", async () => {
+    using _env = setup();
+    useComposerDraftStore.getState().addImages(
+      first,
+      Array.from({ length: PROVIDER_SEND_TURN_MAX_ATTACHMENTS }, (_, index) => ({
+        type: "image" as const,
+        id: `staged-${index}`,
+        name: `staged-${index}.png`,
+        mimeType: "image/png",
+        sizeBytes: 3,
+        previewUrl: `data:image/png;base64,AQID${index}`,
+        file: new File([new Uint8Array([1, 2, 3])], `staged-${index}.png`, { type: "image/png" }),
+      })),
+    );
+    const untrack = trackOpenQuestionAttachmentDraft(threadRef, { ...request, draftId: second });
+    try {
+      const { bridge, acknowledgeSnapShot } = makeBridge();
+      await expect(deliverSnapShot(bridge, capture, () => second)).rejects.toThrow(
+        "Remove an attachment",
+      );
+      expect(useComposerDraftStore.getState().getComposerDraft(second)?.images ?? []).toHaveLength(
+        0,
+      );
+      expect(acknowledgeSnapShot).not.toHaveBeenCalled();
+    } finally {
+      untrack();
+    }
   });
 });
 
@@ -609,6 +754,7 @@ describe("durable snapshot delivery", () => {
   it.each([false, true])(
     "retains a capture on quota failure and retries without duplicates (staged: %s)",
     async (staged) => {
+      using _env = setup();
       const target = scopeThreadRef(environmentId, ThreadId.make("quota-thread"));
       const capture = {
         id: "12345678-1234-1234-1234-123456789abc",
@@ -643,7 +789,7 @@ describe("durable snapshot delivery", () => {
           });
           void store.syncPersistedAttachments(target, [capture]);
         }
-        await expect(deliverSnapShot(bridge, capture, target)).rejects.toThrow(
+        await expect(deliverSnapShot(bridge, capture, () => target)).rejects.toThrow(
           "could not be saved",
         );
         expect(acknowledgeSnapShot).not.toHaveBeenCalled();
@@ -651,7 +797,7 @@ describe("durable snapshot delivery", () => {
           useComposerDraftStore.getState().getComposerDraft(target)?.nonPersistedImageIds,
         ).toContain(capture.id);
         storage.setItem.mockImplementation(write);
-        await deliverSnapShot(bridge, capture, target);
+        await deliverSnapShot(bridge, capture, () => target);
         expect(acknowledgeSnapShot).toHaveBeenCalledExactlyOnceWith(capture.id);
         expect(useComposerDraftStore.getState().getComposerDraft(target)?.images).toHaveLength(1);
         expect(
@@ -668,6 +814,7 @@ describe("snapshot destination ownership", () => {
   it.each(["unmount", "blur", "disabled animations"])(
     "keeps the original environment and thread after %s",
     async (reason) => {
+      using _env = setup();
       const original = scopeThreadRef(environmentId, ThreadId.make("original"));
       const next = scopeThreadRef(EnvironmentId.make("another-environment"), ThreadId.make("next"));
       const targets = new Map<string, Promise<typeof original | null>>();
