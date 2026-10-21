@@ -125,14 +125,14 @@ export interface CopilotAcpRuntimeInput
   readonly environment: NodeJS.ProcessEnv;
 }
 
-export const makeCopilotAcpRuntime = (
-  input: CopilotAcpRuntimeInput,
-): Effect.Effect<
-  AcpSessionRuntime.AcpSessionRuntime["Service"],
-  EffectAcpErrors.AcpError,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
-> =>
-  Effect.gen(function* () {
+export const makeCopilotAcpRuntime = Effect.fn("CopilotAcpSupport.makeCopilotAcpRuntime")(
+  function* (
+    input: CopilotAcpRuntimeInput,
+  ): Effect.fn.Return<
+    AcpSessionRuntime.AcpSessionRuntime["Service"],
+    EffectAcpErrors.AcpError,
+    ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
+  > {
     const { settings, environment, runtimeMode, disableBuiltinMcps, toolless, ...options } = input;
     const context = yield* Layer.build(
       AcpSessionRuntime.layer({
@@ -149,4 +149,5 @@ export const makeCopilotAcpRuntime = (
       }),
     );
     return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(Effect.provide(context));
-  });
+  },
+);

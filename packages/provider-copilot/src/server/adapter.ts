@@ -174,16 +174,18 @@ function makeCopilotAcpAdapterFlavor(
         })),
     // `auto` is a model Copilot routes per request, not a sentinel, so it is
     // written like any other choice and switching back to it works.
-    applyModelSelection: ({ runtime, modelSelection }) =>
-      Effect.gen(function* () {
-        const requested = modelSelection.model.trim() || COPILOT_AUTO_MODEL_SLUG;
-        const configOptions = yield* runtime.getConfigOptions;
-        const current = configOptions.find((option) => option.category === "model")?.currentValue;
-        if (current !== requested) {
-          yield* runtime.setModel(requested);
-        }
-        return requested;
-      }),
+    applyModelSelection: Effect.fn("CopilotAdapter.applyModelSelection")(function* ({
+      runtime,
+      modelSelection,
+    }) {
+      const requested = modelSelection.model.trim() || COPILOT_AUTO_MODEL_SLUG;
+      const configOptions = yield* runtime.getConfigOptions;
+      const current = configOptions.find((option) => option.category === "model")?.currentValue;
+      if (current !== requested) {
+        yield* runtime.setModel(requested);
+      }
+      return requested;
+    }),
     registerExtensions: (context) =>
       routing
         .registerExtensions(context)

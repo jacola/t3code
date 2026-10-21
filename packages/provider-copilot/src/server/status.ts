@@ -133,28 +133,27 @@ const readCopilotAuth = Effect.fn("readCopilotAuth")(function* (input: {
   };
 });
 
-const runCopilotCommand = (
+const runCopilotCommand = Effect.fn("CopilotProviderStatus.runCopilotCommand")(function* (
   settings: Pick<CopilotSettings, "binaryPath">,
   args: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv,
   cwd?: string,
-) =>
-  Effect.gen(function* () {
-    const command = resolveCopilotCommand(settings);
-    const spawnCommand = yield* resolveSpawnCommand(command, args, {
+) {
+  const command = resolveCopilotCommand(settings);
+  const spawnCommand = yield* resolveSpawnCommand(command, args, {
+    env: environment,
+    extendEnv: false,
+  });
+  return yield* spawnAndCollect(
+    command,
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      ...(cwd ? { cwd } : {}),
       env: environment,
       extendEnv: false,
-    });
-    return yield* spawnAndCollect(
-      command,
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        ...(cwd ? { cwd } : {}),
-        env: environment,
-        extendEnv: false,
-        shell: spawnCommand.shell,
-      }),
-    );
-  });
+      shell: spawnCommand.shell,
+    }),
+  );
+});
 
 /**
  * Copilot runs a skill as the `/name` slash command it advertises, so skills
@@ -241,30 +240,30 @@ export function withCopilotCatalog<
   } as Snapshot;
 }
 
-export function buildInitialCopilotProviderSnapshot(
+export const buildInitialCopilotProviderSnapshot = Effect.fn(
+  "CopilotProviderStatus.buildInitialCopilotProviderSnapshot",
+)(function* (
   settings: CopilotSettings,
   catalog: CopilotCatalog,
-): Effect.Effect<ServerProviderDraft> {
-  return Effect.gen(function* () {
-    const checkedAt = DateTime.formatIso(yield* DateTime.now);
-    return buildServerProvider({
-      presentation: COPILOT_PRESENTATION,
-      enabled: settings.enabled,
-      checkedAt,
-      models: copilotModelsFromCatalog(catalog, settings.customModels),
-      slashCommands: mergeCopilotSlashCommands(catalog.slashCommands, [COMPACT_SLASH_COMMAND]),
-      probe: {
-        installed: settings.enabled,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: settings.enabled
-          ? "Checking GitHub Copilot CLI availability..."
-          : "GitHub Copilot is disabled in T3 Code settings.",
-      },
-    });
+): Effect.fn.Return<ServerProviderDraft> {
+  const checkedAt = DateTime.formatIso(yield* DateTime.now);
+  return buildServerProvider({
+    presentation: COPILOT_PRESENTATION,
+    enabled: settings.enabled,
+    checkedAt,
+    models: copilotModelsFromCatalog(catalog, settings.customModels),
+    slashCommands: mergeCopilotSlashCommands(catalog.slashCommands, [COMPACT_SLASH_COMMAND]),
+    probe: {
+      installed: settings.enabled,
+      version: null,
+      status: "warning",
+      auth: { status: "unknown" },
+      message: settings.enabled
+        ? "Checking GitHub Copilot CLI availability..."
+        : "GitHub Copilot is disabled in T3 Code settings.",
+    },
   });
-}
+});
 
 /**
  * Never opens an ACP session: that would start the user's MCP servers and
